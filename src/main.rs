@@ -468,7 +468,7 @@ async fn post_event_(
             .send_event_builder(builder)
             .await
             .inspect_err(|_e| *code = 500)?;
-        let wm = WsMessage::new(200).data(sent.val.to_hex());
+        let wm = WsMessage::new(200).data(EventOutput::new(sent).json());
         Ok(wm)
     } else {
         if user.len() < 1 {
@@ -505,8 +505,39 @@ async fn post_event_(
             .await
             .inspect_err(|_e| *code = 500)?;
 
-        let wm = WsMessage::new(200).data(resp.val.to_hex());
+        let wm = WsMessage::new(200).data(EventOutput::new(resp).json());
         Ok(wm)
+    }
+}
+
+use std::collections::BTreeMap as Map;
+use std::collections::BTreeSet as Set;
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
+pub struct EventOutput {
+    pub val: String,
+    pub success: Set<String>,
+    pub failed: Map<String, Option<String>>,
+}
+
+impl EventOutput {
+    fn new(out: Output<EventId>) -> Self {
+        let Output {
+            val,
+            success,
+            failed,
+        } = out;
+
+        Self {
+            val: val.to_hex(),
+            success: success.iter().map(|s| s.to_string()).collect(),
+            failed: failed
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
+        }
+    }
+    fn json(&self) -> String {
+        serde_json::to_string(&self).unwrap()
     }
 }
 
