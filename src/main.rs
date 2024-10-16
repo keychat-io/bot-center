@@ -261,17 +261,22 @@ async fn main() -> anyhow::Result<()> {
                             RelayPoolNotification::Message {
                                 message,
                                 relay_url: _,
-                            } => {
-                                if let RelayMessage::Event {
+                            } => match message {
+                                RelayMessage::Event {
                                     subscription_id,
                                     event,
-                                } = message
-                                {
+                                } => {
                                     debug!("{} {} {:?}", k, subscription_id, event);
-                                } else {
-                                    info!("{} relay message: {:?}", k, message);
                                 }
-                            }
+                                RelayMessage::Ok {
+                                    event_id,
+                                    status,
+                                    message,
+                                } => {
+                                    info!("{} {} Ok {} {}", k, event_id.to_hex(), status, message);
+                                }
+                                others => info!("{} relay message: {:?}", k, others),
+                            },
                             RelayPoolNotification::RelayStatus {
                                 status,
                                 relay_url: _,
