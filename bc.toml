@@ -1,0 +1,12 @@
+listen = "0.0.0.0:5001"
+
+allow_pending = false
+allow_free = false
+database = "botcenter.db"
+timeout_ms = 3000
+
+relays = [
+    # "wss://relay.keychat.io",
+    "wss://backup.keychat.io",
+]
+
