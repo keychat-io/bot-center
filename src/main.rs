@@ -294,7 +294,8 @@ async fn main() -> anyhow::Result<()> {
 
     // build our application with some routes
     let app = Router::new()
-        .route("/event/:keys", axum::routing::post(post_event))
+        .route("/metadata/:key", axum::routing::post(post_metadata))
+        .route("/event/from/:from/to/:to", axum::routing::post(post_event))
         .route("/ws", any(ws_handler))
         .with_state(state.clone())
         .layer(
@@ -387,24 +388,41 @@ use futures::{sink::SinkExt, stream::StreamExt};
 //     Json(js)
 // }
 
-async fn post_event(
-    ConnectInfo(sa): ConnectInfo<SocketAddr>,
-    AxumState(state): AxumState<State>,
-    Path(keys): Path<String>,
+async fn post_metadata(
+    sa: ConnectInfo<SocketAddr>,
+    state: AxumState<State>,
+    Path(key): Path<String>,
     _header: HeaderMap,
     body: String,
 ) -> impl IntoResponse {
-    info!("{} post_event {} {}:\n{:?}", sa, keys, body.len(), body);
+    post_event(sa, state, Path((key, String::new())), _header, body).await
+}
+
+async fn post_event(
+    ConnectInfo(sa): ConnectInfo<SocketAddr>,
+    AxumState(state): AxumState<State>,
+    Path((from, to)): Path<(String, String)>,
+    _header: HeaderMap,
+    body: String,
+) -> impl IntoResponse {
+    info!(
+        "{} post_event {}->{} {}:\n{:?}",
+        sa,
+        from,
+        to,
+        body.len(),
+        body
+    );
 
     let f = |s| axum::response::Response::new(s);
     let mut code = 200;
-    match post_event_(sa, &state, &keys, &body, &mut code).await {
+    match post_event_(sa, &state, &from, &to, &body, &mut code).await {
         Ok(body) => {
             let js = serde_json::to_string(&body).unwrap();
             f(js)
         }
         Err(e) => {
-            warn!("{} post_event {} failed: {}", sa, keys, e,);
+            warn!("{} post_event {}->{} failed: {}", sa, from, to, e,);
 
             let mut resp = f(e.to_string());
             *resp.status_mut() = StatusCode::from_u16(code).unwrap();
@@ -416,30 +434,25 @@ async fn post_event(
 async fn post_event_(
     _sa: SocketAddr,
     state: &State,
-    keys: &String,
+    key: &str,
+    user: &str,
     body: &String,
     code: &mut u16,
 ) -> anyhow::Result<WsMessage> {
     let js = serde_json::from_str::<Value>(&body).inspect_err(|_e| *code = 400)?;
 
-    let keys: Vec<_> = keys
-        .split(",")
-        .map(|s| s.trim())
-        .filter(|s| s.len() >= 1)
-        .collect();
-    if keys.len() < 1 {
-        bail!("empty keys");
+    if key.len() < 1 {
+        bail!("key from empty");
     }
 
-    let key = &keys[0];
-    let client = state.clients.get(*key).map(|c| c.clone()).ok_or_else(|| {
+    let client = state.clients.get(key).map(|c| c.clone()).ok_or_else(|| {
         *code = 404;
-        anyhow!("not found the key")
+        anyhow!("not found the key from")
     })?;
 
     let tag = SingleLetterTag::lowercase(Alphabet::P);
     let typo = js.get("type").and_then(|v| v.as_str()).unwrap_or_default();
-    if typo == "ChatBot" {
+    if typo == "ChatBot" && user.is_empty() {
         let metadata: Metadata = serde_json::from_value(js).inspect_err(|_e| *code = 400)?;
         let builder = EventBuilder::metadata(&metadata).add_tags(vec![Tag::custom(
             TagKind::SingleLetter(tag.clone()),
@@ -453,10 +466,9 @@ async fn post_event_(
         let wm = WsMessage::new(200).data(sent.val.to_hex());
         Ok(wm)
     } else {
-        if keys.len() < 2 {
-            bail!("user key missing");
+        if user.len() < 1 {
+            bail!("key to missing");
         }
-        let user = &keys[1];
         let s = client.signer().await.unwrap();
         // let ks = if let NostrSigner::Keys(ks) = &s {
         //     ks
