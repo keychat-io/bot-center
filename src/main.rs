@@ -439,8 +439,6 @@ async fn post_event_(
     body: &String,
     code: &mut u16,
 ) -> anyhow::Result<WsMessage> {
-    let js = serde_json::from_str::<Value>(&body).inspect_err(|_e| *code = 400)?;
-
     if key.len() < 1 {
         bail!("key from empty");
     }
@@ -454,6 +452,7 @@ async fn post_event_(
     let tag = SingleLetterTag::lowercase(Alphabet::P);
     // let typo = js.get("type").and_then(|v| v.as_str()).unwrap_or_default();
     if user.is_empty() {
+        let js = serde_json::from_str::<Value>(&body).inspect_err(|_e| *code = 400)?;
         let metadata: Metadata = serde_json::from_value(js).inspect_err(|_e| *code = 400)?;
         let builder = EventBuilder::metadata(&metadata).add_tags(vec![Tag::custom(
             TagKind::SingleLetter(tag.clone()),
