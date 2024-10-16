@@ -583,8 +583,24 @@ async fn handle_socket(mut socket: WebSocket, who: SocketAddr, state: State) -> 
             metas.push(wm);
             continue;
         };
-        let meta = c.unwrap().metadata(p.parse()?).await;
-        match meta {
+
+        let filter: Filter = Filter::new()
+            .author(public_key)
+            .kind(Kind::Metadata)
+            .limit(1);
+        let events: Vec<Event> = self.get_events_of(vec![filter], None).await?; // TODO: add timeout?
+        match events.first() {
+            Some(event) => Ok(Metadata::from_json(event.content())?),
+            None => Err(Error::MetadataNotFound),
+        }
+
+        let filter = Filter::new()
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::P), vec![p.clone()])
+            .kinds([Kind::Custom(0)])
+            .limit(1);
+        let events = c.unwrap().get_events_of(vec![filter], None).await;
+        // let meta = c.unwrap().metadata(p.parse()?).await;
+        match events.and_then(|s|s.first().ok_or_else(|nostr_sdk::) {
             Ok(m) => {
                 let js = serde_json::to_string(&m)?;
                 metas.push(WsMessage::new(200).data(js));
