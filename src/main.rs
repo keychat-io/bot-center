@@ -444,6 +444,7 @@ async fn post_event_(
     if key.len() < 1 {
         bail!("key from empty");
     }
+    key.parse::<PublicKey>().inspect_err(|_e| *code = 400)?;
 
     let client = state.clients.get(key).map(|c| c.clone()).ok_or_else(|| {
         *code = 404;
@@ -451,8 +452,8 @@ async fn post_event_(
     })?;
 
     let tag = SingleLetterTag::lowercase(Alphabet::P);
-    let typo = js.get("type").and_then(|v| v.as_str()).unwrap_or_default();
-    if typo == "ChatBot" && user.is_empty() {
+    // let typo = js.get("type").and_then(|v| v.as_str()).unwrap_or_default();
+    if user.is_empty() {
         let metadata: Metadata = serde_json::from_value(js).inspect_err(|_e| *code = 400)?;
         let builder = EventBuilder::metadata(&metadata).add_tags(vec![Tag::custom(
             TagKind::SingleLetter(tag.clone()),
@@ -469,6 +470,7 @@ async fn post_event_(
         if user.len() < 1 {
             bail!("key to missing");
         }
+        user.parse::<PublicKey>().inspect_err(|_e| *code = 400)?;
         let s = client.signer().await.unwrap();
         // let ks = if let NostrSigner::Keys(ks) = &s {
         //     ks
