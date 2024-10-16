@@ -55,7 +55,7 @@ curl -X POST -H 'Content-type: application/json' --data '{"name":"ChatGPT","desc
 ```js
 // subcribe by bot's pubkey: Hex format(lowercase, without 0x), multiple use ';' separate
 socket.send("0d61dcd0bbccdfe6b222f87c7d724da3050569ef8dc6f26ef7d74d24eafd99cc;");
-// first message is metadata from center is [{"code":200,"error":null,"data":"{}...]
+// first message is metadatas from center is [{"code":200,"error":null,"data":'{"id":"","from":"","to":"","ts":1729000000000,"kind":0,"content":""}'}...]
 // 
 // messages follow is events, to is the pubkey of bot, from is the pubkey of user
 {"id":"","from":"","to":"","ts":1729000000000,"kind":4,"content":""}

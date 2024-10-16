@@ -584,25 +584,41 @@ async fn handle_socket(mut socket: WebSocket, who: SocketAddr, state: State) -> 
             continue;
         };
 
-        let filter: Filter = Filter::new()
-            .author(public_key)
-            .kind(Kind::Metadata)
-            .limit(1);
-        let events: Vec<Event> = self.get_events_of(vec![filter], None).await?; // TODO: add timeout?
-        match events.first() {
-            Some(event) => Ok(Metadata::from_json(event.content())?),
-            None => Err(Error::MetadataNotFound),
-        }
-
         let filter = Filter::new()
-            .custom_tag(SingleLetterTag::lowercase(Alphabet::P), vec![p.clone()])
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::P), vec![*p])
             .kinds([Kind::Custom(0)])
             .limit(1);
         let events = c.unwrap().get_events_of(vec![filter], None).await;
         // let meta = c.unwrap().metadata(p.parse()?).await;
-        match events.and_then(|s|s.first().ok_or_else(|nostr_sdk::) {
+        match events.and_then(|s| {
+            s.into_iter()
+                .next()
+                .ok_or_else(|| nostr_sdk::client::Error::MetadataNotFound)
+        }) {
             Ok(m) => {
-                let js = serde_json::to_string(&m)?;
+                debug!("metadata: {:?}", serde_json::to_string(&m).unwrap());
+
+                let mut msg = EventMsg::default();
+                msg.id = m.id().to_hex();
+                msg.ts = m.created_at().as_u64() * 1000;
+                msg.from = m.author().to_hex();
+                msg.content.replace(m.content.clone());
+                msg.kind = m.kind().as_u16();
+                msg.to = m
+                    .tags
+                    .iter()
+                    .filter_map(|ts| {
+                        let slice = ts.clone().to_vec();
+                        if slice.len() >= 2 && slice[0] == "p" {
+                            Some(slice[1].to_string())
+                        } else {
+                            None
+                        }
+                    })
+                    .next()
+                    .unwrap_or_default();
+
+                let js = serde_json::to_string(&msg)?;
                 metas.push(WsMessage::new(200).data(js));
             }
             Err(e) => {
