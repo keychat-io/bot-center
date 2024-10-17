@@ -174,16 +174,17 @@ async fn main() -> anyhow::Result<()> {
                                         match msg {
                                             Ok(m) => {
                                                 // double 04: ["EVENT", {}]
-                                                if let Ok((_, m)) =
+                                                if let Ok((_, e)) =
                                                     serde_json::from_str::<(String, Event)>(&m)
                                                 {
-                                                    if m.kind.as_u16() == 4 {
-                                                        if let Ok(m) =  s.nip04_decrypt(m.author(), m.content()).await.map_err(|e|{
+                                                    if e.kind.as_u16() == 4 {
+                                                        if let Ok(m) =  s.nip04_decrypt(e.author(), e.content()).await.map_err(|e|{
                                                             error!(
                                                                 "{} stream_event 04.04 decrypt failed: {} {} {} {} {}",
                                                                 k, ks, event.created_at, event.kind, event.id, e
                                                             );
                                                         }){
+                                                            wrap.from = e.author().to_hex();
                                                             wrap.content.replace(m);
                                                         }
                                                     }
