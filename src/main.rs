@@ -23,6 +23,21 @@ async fn main() -> anyhow::Result<()> {
         fmt.with_max_level(max).init()
     }
 
+    if opts.generate {
+        let my_keys = Keys::generate();
+        println!(
+            "{}: {}",
+            my_keys.secret_key().unwrap().to_secret_hex(),
+            my_keys.public_key().to_hex()
+        );
+        println!(
+            "{}: {}",
+            my_keys.secret_key().unwrap().to_bech32().unwrap(),
+            my_keys.public_key().to_bech32().unwrap(),
+        );
+        return Ok(());
+    }
+
     // let addr = "0.0.0.0:50051".parse().unwrap();
     let config = match opts.parse_config() {
         Ok(c) => c,
@@ -33,9 +48,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let db = LitePool::open(&config.database).await?;
 
-    // let my_keys = Keys::generate();
-    // println!("{}: {}", my_keys.secret_key().unwrap().to_secret_hex(), my_keys.public_key().to_bech32().unwrap());
-    // return Ok(());
+    // keychat_rust_ffi_plugin::api_cashu::init_db(config.cashu.database.clone(), None, false).await?;
 
     let (bs, _bc) = broadcast::channel(1000);
     let clients = DashMap::new();

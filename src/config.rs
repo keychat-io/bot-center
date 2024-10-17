@@ -3,6 +3,8 @@
 pub struct Opts {
     // #[clap(short, long, help = "The address of serve")]
     // pub listen: SocketAddr,
+    #[clap(short, long, help = "Generate a nostr keypair")]
+    pub generate: bool,
     #[clap(
         short,
         long,
@@ -40,11 +42,18 @@ use std::net::SocketAddr;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Config {
     pub listen: SocketAddr,
+    pub database: String,
+    pub timeout_ms: u64,
+    pub relays: Vec<String>,
+    pub cashu: ConfigCashu,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConfigCashu {
+    pub mints: Vec<String>,
+    pub database: String,
     #[serde(default)]
     pub allow_pending: bool,
     #[serde(default)]
     pub allow_free: bool,
-    pub database: String,
-    pub timeout_ms: u64,
-    pub relays: Vec<String>,
 }
