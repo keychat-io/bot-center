@@ -622,7 +622,8 @@ async fn handle_socket(mut socket: WebSocket, who: SocketAddr, state: State) -> 
         };
 
         let filter = Filter::new()
-            .custom_tag(SingleLetterTag::lowercase(Alphabet::P), vec![*p])
+            .pubkey(p.parse()?)
+            // .custom_tag(SingleLetterTag::lowercase(Alphabet::P), vec![*p])
             .kinds([Kind::Custom(0)])
             .limit(1);
         let events = c.unwrap().get_events_of(vec![filter], None).await;
