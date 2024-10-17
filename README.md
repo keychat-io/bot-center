@@ -68,7 +68,7 @@ socket.send("0d61dcd0bbccdfe6b222f87c7d724da3050569ef8dc6f26ef7d74d24eafd99cc;")
 ```sh
 curl -v http://0.0.0.0:5001/balance
 # {"code":200,"error":null,"data":"{\"https://8333.space:3338/\":1}"}
-
+```
 
 ### post /receive receive cashu token
 ```sh

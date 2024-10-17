@@ -747,8 +747,8 @@ async fn handle_socket(mut socket: WebSocket, who: SocketAddr, state: State) -> 
     let (mut sender, mut receiver) = socket.split();
     let js = serde_json::to_string(&metas)?;
     sender.send(Message::Text(js)).await?;
-    if metas.iter().all(|m| m.code != 200) {
-        bail!("subcribe keys not inited");
+    if metas.iter().all(|m| m.code == 404) {
+        bail!("the keys subcribed all not inited");
     }
 
     let events = state.db.get_events(&pubkeys).await?;
