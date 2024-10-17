@@ -64,4 +64,16 @@ socket.send("0d61dcd0bbccdfe6b222f87c7d724da3050569ef8dc6f26ef7d74d24eafd99cc;")
 // Hex format(lowercase, without 0x), multiple use ';' separate
 ```
 
+### get /balance get cashu balances
+```sh
+curl -v http://0.0.0.0:5001/balance
+# {"code":200,"error":null,"data":"{\"https://8333.space:3338/\":1}"}
 
+
+### post /receive receive cashu token
+```sh
+curl -X POST -H 'Content-type: application/json' --data 'cashuBo2Ftd2h0dHBzOi8vODMzMy5zcGFjZTozMzM4YXVjc2F0YXSBomFpSAB1nj-LBrNvYXCBo2FhAWFzeEAxZmE5MjA3OGE4OThjYmZkMTgyNDNlMGE4MjY5MGI0NjM2NDk0M2IwOWFiMzBhNWE5NmQ0NGM1ZGRmM2RiMzFjYWNYIQNvnws16oUHGj81iBV05rA6itfAtRnqfgC3WS4CqZVLZw' http://0.0.0.0:5001/receive -v
+
+# return the amount
+# {"code":200,"error":null,"data":"1"}
+```

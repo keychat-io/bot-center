@@ -5,6 +5,8 @@ extern crate serde;
 #[macro_use]
 extern crate tracing;
 
+use keychat_rust_ffi_plugin::api_cashu;
+
 mod config;
 use config::{Config, Opts};
 mod db;
@@ -48,7 +50,16 @@ async fn main() -> anyhow::Result<()> {
     };
     let db = LitePool::open(&config.database).await?;
 
-    // keychat_rust_ffi_plugin::api_cashu::init_db(config.cashu.database.clone(), None, false).await?;
+    api_cashu::init_db(config.cashu.database.clone(), None, false).await?;
+    let mints = api_cashu::init_cashu(64).await?;
+    for mint in config
+        .cashu
+        .mints
+        .iter()
+        .filter(|m| !mints.iter().any(|i| i.url == m.as_str()))
+    {
+        api_cashu::add_mint(mint.to_string()).await?;
+    }
 
     let (bs, _bc) = broadcast::channel(1000);
     let clients = DashMap::new();
@@ -313,9 +324,11 @@ async fn main() -> anyhow::Result<()> {
 
     // build our application with some routes
     let app = Router::new()
-        .route("/metadata/:key", axum::routing::post(post_metadata))
-        .route("/event/from/:from/to/:to", axum::routing::post(post_event))
-        .route("/ws", any(ws_handler))
+        .route("/metadata/:key", routing::post(post_metadata))
+        .route("/event/from/:from/to/:to", routing::post(post_event))
+        .route("/ws", routing::any(ws_handler))
+        .route("/balance", routing::get(get_balance))
+        .route("/receive", routing::post(post_receive))
         .with_state(state.clone())
         .layer(
             TraceLayer::new_for_http()
@@ -386,8 +399,7 @@ use axum::{
     },
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    routing::any,
-    Json, Router,
+    routing, Json, Router,
 };
 
 use dashmap::DashMap;
@@ -399,13 +411,70 @@ use tower_http::trace::{DefaultMakeSpan, TraceLayer};
 //allows to split the websocket stream into separate TX and RX branches
 use futures::{sink::SinkExt, stream::StreamExt};
 
-// async fn get_metadata(
-//     ConnectInfo(_sa): ConnectInfo<SocketAddr>,
-//     AxumState(state): AxumState<State>,
-//     Path(key): Path<String>,
-// ) -> Json<Value> {
-//     Json(js)
-// }
+async fn get_balance(
+    ConnectInfo(_sa): ConnectInfo<SocketAddr>,
+    AxumState(_state): AxumState<State>,
+) -> Json<WsMessage> {
+    let balance = api_cashu::get_balances().await;
+
+    let mut msg = WsMessage::new(200);
+    match balance {
+        Ok(b) => {
+            msg.data.replace(b);
+        }
+        Err(e) => {
+            msg.code = 500;
+            msg.error.replace(e.to_string());
+        }
+    }
+
+    Json(msg)
+}
+
+async fn post_receive(
+    ConnectInfo(sa): ConnectInfo<SocketAddr>,
+    AxumState(state): AxumState<State>,
+    _header: HeaderMap,
+    body: String,
+) -> impl IntoResponse {
+    let body = body.trim();
+    info!("{} post_receive {} bytes: {}", sa, body.len(), body,);
+
+    let f = |s| axum::response::Response::new(s);
+    let mut code = 200;
+    match post_receive_(sa, &state, body, &mut code).await {
+        Ok(body) => {
+            info!("{} post_receive ok: {:?}", sa, body.data);
+
+            let js = serde_json::to_string(&body).unwrap();
+            f(js)
+        }
+        Err(e) => {
+            warn!("{} post_receive failed: {}", sa, e);
+
+            let msg = WsMessage::new(code).error(e.to_string());
+            let js = serde_json::to_string(&msg).unwrap();
+
+            let mut resp = f(js);
+            *resp.status_mut() = StatusCode::from_u16(code).unwrap();
+            resp
+        }
+    }
+}
+
+async fn post_receive_(
+    _sa: SocketAddr,
+    _state: &State,
+    body: &str,
+    code: &mut u16,
+) -> anyhow::Result<WsMessage> {
+    // let token = api_cashu::decode_token(body.trim().to_string()).inspect_err(|_e| *code = 400)?;
+    let txs = api_cashu::receive_token(body.to_string())
+        .await
+        .inspect_err(|_e| *code = 400)?;
+    let amount = txs.iter().map(|t| t.amount()).sum::<u64>();
+    Ok(WsMessage::default().code(200).data(amount.to_string()))
+}
 
 async fn post_metadata(
     sa: ConnectInfo<SocketAddr>,
@@ -443,7 +512,10 @@ async fn post_event(
         Err(e) => {
             warn!("{} post_event {}->{} failed: {}", sa, from, to, e,);
 
-            let mut resp = f(e.to_string());
+            let msg = WsMessage::new(code).error(e.to_string());
+            let js = serde_json::to_string(&msg).unwrap();
+
+            let mut resp = f(js);
             *resp.status_mut() = StatusCode::from_u16(code).unwrap();
             resp
         }
@@ -458,9 +530,6 @@ async fn post_event_(
     body: &String,
     code: &mut u16,
 ) -> anyhow::Result<WsMessage> {
-    if key.len() < 1 {
-        bail!("key from empty");
-    }
     key.parse::<PublicKey>().inspect_err(|_e| *code = 400)?;
 
     let client = state.clients.get(key).map(|c| c.clone()).ok_or_else(|| {
@@ -485,9 +554,6 @@ async fn post_event_(
         let wm = WsMessage::new(200).data(EventOutput::new(sent).json());
         Ok(wm)
     } else {
-        if user.len() < 1 {
-            bail!("key to missing");
-        }
         user.parse::<PublicKey>().inspect_err(|_e| *code = 400)?;
         let s = client.signer().await.unwrap();
         // let ks = if let NostrSigner::Keys(ks) = &s {

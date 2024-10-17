@@ -48,9 +48,10 @@ pub struct Config {
     pub cashu: ConfigCashu,
 }
 
+use keychat_rust_ffi_plugin::api_cashu::cashu_wallet::Url;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConfigCashu {
-    pub mints: Vec<String>,
+    pub mints: Vec<Url>,
     pub database: String,
     #[serde(default)]
     pub allow_pending: bool,
