@@ -1959,6 +1959,7 @@ dependencies = [
 [[package]]
 name = "keychat_rust_ffi_plugin"
 version = "1.0.0"
+source = "git+https://github.com/keychat-io/keychat_rust_ffi_plugin.git?rev=565456a3#565456a37c4e19787c6a0e5e1cb07a19691600b6"
 dependencies = [
  "anyhow",
  "async-trait",

@@ -766,9 +766,30 @@ async fn handle_socket(mut socket: WebSocket, who: SocketAddr, state: State) -> 
         tokio::select! {
             event = sc.recv()  => {
                 match event {
-                    Ok(a) => {
+                    Ok(mut a) => {
                         info!("ws-{who} recv broadcasted events: {}", a.id);
                         if pubkeys.contains(&a.to.as_ref()) {
+
+                            if a.content.is_some() {
+                                if let Ok(mut js) = serde_json::from_str::<Value>(a.content.as_ref().unwrap()) {
+                                    if let Some(v) = js.get("payToken").cloned() {
+                                        if let Some(s) = v.as_str() {
+                                            match api_cashu::decode_token(s.trim().to_string()) {
+                                                Ok(i) => {
+                                                    let ijs = serde_json::to_string(&i)?;
+                                                    js["payTokenDecode"] = ijs.into();
+                                                    let js2 =serde_json::to_string(&js)?;
+                                                    a.content.replace(js2);
+                                                }
+                                                Err(e) => {
+                                                    warn!("{} decode_token failed ignore: {} {}", a.id, e, s);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
                             let js = serde_json::to_string(&a).unwrap();
                             let res = sender.send(Message::Text(js)).await;
                             info!("ws-{who} send {}: {:?}", a.id, res);
