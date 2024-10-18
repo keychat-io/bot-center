@@ -776,8 +776,8 @@ async fn handle_socket(mut socket: WebSocket, who: SocketAddr, state: State) -> 
                                         if let Some(s) = v.as_str() {
                                             match api_cashu::decode_token(s.trim().to_string()) {
                                                 Ok(i) => {
-                                                    let ijs = serde_json::to_string(&i)?;
-                                                    js["payTokenDecode"] = ijs.into();
+                                                    // let ijs = serde_json::to_string(&i)?;
+                                                    js["payTokenDecode"] = serde_json::to_value(i)?;
                                                     let js2 =serde_json::to_string(&js)?;
                                                     a.content.replace(js2);
                                                 }
