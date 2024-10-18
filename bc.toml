@@ -3,8 +3,8 @@ listen = "0.0.0.0:5001"
 timeout_ms = 3000
 
 relays = [
-  # "wss://relay.keychat.io",
-  "wss://backup.keychat.io",
+  "wss://relay.keychat.io",
+#   "wss://backup.keychat.io",
 ]
 
 [cashu]

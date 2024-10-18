@@ -29,12 +29,12 @@ async fn main() -> anyhow::Result<()> {
         let my_keys = Keys::generate();
         println!(
             "{}: {}",
-            my_keys.secret_key().unwrap().to_secret_hex(),
+            my_keys.secret_key().to_secret_hex(),
             my_keys.public_key().to_hex()
         );
         println!(
             "{}: {}",
-            my_keys.secret_key().unwrap().to_bech32().unwrap(),
+            my_keys.secret_key().to_bech32().unwrap(),
             my_keys.public_key().to_bech32().unwrap(),
         );
         return Ok(());
@@ -84,11 +84,11 @@ async fn main() -> anyhow::Result<()> {
 
         let client = connect(&config, &my_keys).await?;
         let meta = client
-            .metadata(my_keys.public_key())
-            // .fetch_metadata(
-            //     my_keys.public_key(),
-            //     Some(Duration::from_millis(config.timeout_ms)),
-            // )
+            // .metadata(my_keys.public_key())
+            .fetch_metadata(
+                my_keys.public_key(),
+                Some(Duration::from_millis(config.timeout_ms)),
+            )
             .await;
         debug!("metadata: {:?}", meta);
         match meta {
@@ -194,7 +194,7 @@ async fn main() -> anyhow::Result<()> {
                                         // );
                                         let s = c.signer().await.unwrap();
                                         let msg =
-                                            s.nip04_decrypt(event.author(), event.content()).await;
+                                            s.nip04_decrypt(&event.pubkey, &event.content).await;
                                         match msg {
                                             Ok(m) => {
                                                 // double 04: ["EVENT", {}]
@@ -202,13 +202,13 @@ async fn main() -> anyhow::Result<()> {
                                                     serde_json::from_str::<(String, Event)>(&m)
                                                 {
                                                     if e.kind.as_u16() == 4 {
-                                                        if let Ok(m) =  s.nip04_decrypt(e.author(), e.content()).await.map_err(|e|{
+                                                        if let Ok(m) =  s.nip04_decrypt(&e.pubkey, &e.content).await.map_err(|e|{
                                                             error!(
                                                                 "{} stream_event 04.04 decrypt failed: {} {} {} {} {}",
                                                                 k, ks, event.created_at, event.kind, event.id, e
                                                             );
                                                         }){
-                                                            wrap.from = e.author().to_hex();
+                                                            wrap.from = e.pubkey.to_hex();
                                                             wrap.content.replace(m);
                                                         }
                                                     }
@@ -260,9 +260,9 @@ async fn main() -> anyhow::Result<()> {
 
                                 wrap.to = k.clone();
                                 wrap.id = id.to_hex();
-                                wrap.kind = event.kind().as_u16();
+                                wrap.kind = event.kind.as_u16();
                                 if wrap.from.is_empty() {
-                                    wrap.from = event.author().to_hex();
+                                    wrap.from = event.pubkey.to_hex();
                                 }
                                 if wrap.ts == 0 {
                                     wrap.ts = event.created_at.as_u64() * 1000;
@@ -283,29 +283,42 @@ async fn main() -> anyhow::Result<()> {
                                         .ok();
                                 }
                             }
-                            RelayPoolNotification::Message {
-                                message,
-                                relay_url: _,
-                            } => match message {
-                                RelayMessage::Event {
-                                    subscription_id,
-                                    event,
-                                } => {
-                                    debug!("{} {} {:?}", k, subscription_id, event);
+                            RelayPoolNotification::Message { message, relay_url } => {
+                                match message {
+                                    RelayMessage::Event {
+                                        subscription_id,
+                                        event,
+                                    } => {
+                                        debug!(
+                                            "{} {} {} {:?}",
+                                            k, relay_url, subscription_id, event
+                                        );
+                                    }
+                                    RelayMessage::Ok {
+                                        event_id,
+                                        status,
+                                        message,
+                                    } => {
+                                        info!(
+                                            "{} {} {} Ok {} {}",
+                                            k,
+                                            event_id.to_hex(),
+                                            relay_url,
+                                            status,
+                                            message
+                                        );
+                                    }
+                                    others => {
+                                        info!("{} relay {} message: {:?}", k, relay_url, others)
+                                    }
                                 }
-                                RelayMessage::Ok {
-                                    event_id,
-                                    status,
-                                    message,
-                                } => {
-                                    info!("{} {} Ok {} {}", k, event_id.to_hex(), status, message);
-                                }
-                                others => info!("{} relay message: {:?}", k, others),
-                            },
-                            RelayPoolNotification::RelayStatus {
-                                status,
-                                relay_url: _,
-                            } => info!("{} relay status: {}", k, status,),
+                            }
+                            RelayPoolNotification::RelayStatus { status, relay_url } => {
+                                info!("{} relay {} status: {}", k, relay_url, status,)
+                            }
+                            RelayPoolNotification::Authenticated { relay_url } => {
+                                info!("{} relay {} Authenticated", k, relay_url)
+                            }
                             RelayPoolNotification::Shutdown => {}
                         }
                         Ok(false)
@@ -354,7 +367,7 @@ use nostr_sdk::prelude::*;
 use std::time::Duration;
 async fn connect(config: &Config, keys: &Keys) -> anyhow::Result<Client> {
     let opts = nostr_sdk::client::options::Options::new()
-        // .autoconnect(true)
+        .autoconnect(true)
         .connection_timeout(Some(Duration::from_millis(6000)));
     let client = Client::with_opts(keys, opts);
 
@@ -530,7 +543,7 @@ async fn post_event_(
     body: &String,
     code: &mut u16,
 ) -> anyhow::Result<WsMessage> {
-    key.parse::<PublicKey>().inspect_err(|_e| *code = 400)?;
+    PublicKey::from_hex(key).inspect_err(|_e| *code = 400)?;
 
     let client = state.clients.get(key).map(|c| c.clone()).ok_or_else(|| {
         *code = 404;
@@ -554,7 +567,7 @@ async fn post_event_(
         let wm = WsMessage::new(200).data(EventOutput::new(sent).json());
         Ok(wm)
     } else {
-        user.parse::<PublicKey>().inspect_err(|_e| *code = 400)?;
+        let userpub = PublicKey::from_hex(user).inspect_err(|_e| *code = 400)?;
         let s = client.signer().await.unwrap();
         // let ks = if let NostrSigner::Keys(ks) = &s {
         //     ks
@@ -563,7 +576,7 @@ async fn post_event_(
         // };
 
         let msg = s
-            .nip04_encrypt(user.parse().inspect_err(|_e| *code = 400)?, body)
+            .nip04_encrypt(&userpub, body)
             .await
             .inspect_err(|_e| *code = 500)?;
 
@@ -693,6 +706,7 @@ async fn handle_socket(mut socket: WebSocket, who: SocketAddr, state: State) -> 
 
     let mut metas = vec![];
     for p in &pubkeys {
+        PublicKey::from_hex(p)?;
         let c = state.clients.get(*p).map(|c| c.clone());
         if c.is_none() {
             let wm = WsMessage::default().code(404);
@@ -705,7 +719,13 @@ async fn handle_socket(mut socket: WebSocket, who: SocketAddr, state: State) -> 
             // .custom_tag(SingleLetterTag::lowercase(Alphabet::P), vec![*p])
             .kinds([Kind::Custom(0)])
             .limit(1);
-        let events = c.unwrap().get_events_of(vec![filter], None).await;
+        let events = c
+            .unwrap()
+            .get_events_of(
+                vec![filter],
+                EventSource::both(Some(Duration::from_millis(state.config.timeout_ms))),
+            )
+            .await;
         // let meta = c.unwrap().metadata(p.parse()?).await;
         match events.and_then(|s| {
             s.into_iter()
@@ -716,11 +736,11 @@ async fn handle_socket(mut socket: WebSocket, who: SocketAddr, state: State) -> 
                 debug!("metadata: {:?}", serde_json::to_string(&m).unwrap());
 
                 let mut msg = EventMsg::default();
-                msg.id = m.id().to_hex();
-                msg.ts = m.created_at().as_u64() * 1000;
-                msg.from = m.author().to_hex();
+                msg.id = m.id.to_hex();
+                msg.ts = m.created_at.as_u64() * 1000;
+                msg.from = m.pubkey.to_hex();
                 msg.content.replace(m.content.clone());
-                msg.kind = m.kind().as_u16();
+                msg.kind = m.kind.as_u16();
                 msg.to = m
                     .tags
                     .iter()
@@ -806,10 +826,10 @@ async fn handle_socket(mut socket: WebSocket, who: SocketAddr, state: State) -> 
                 }
 
                 let msg = msg.unwrap()?;
-                let msg = if let Message::Text(text) = msg{
-                    text
-                } else {
-                    bail!("unknown message: {:?}", msg);
+                let msg =  match msg {
+                    Message::Text(text) =>  text,
+                    Message::Ping(_) =>   continue,
+                   other => bail!("unknown message: {:?}", other),
                 };
                 let ids: Vec<_> = msg
                 .split(";")
