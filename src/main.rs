@@ -60,6 +60,39 @@ async fn main() -> anyhow::Result<()> {
     {
         api_cashu::add_mint(mint.to_string()).await?;
     }
+    tokio::spawn(async {
+        let mut interval = tokio::time::interval(Duration::from_secs(600));
+        loop {
+            interval.tick().await;
+            let res = api_cashu::check_pending().await;
+            info!("api_cashu::check_pending: {:?}", res);
+            if let Ok((up, all)) = res {
+                let ts = (api_cashu::cashu_wallet::cashu::util::unix_time() - 600) * 1000;
+                if up > 0 {
+                    let res =
+                        api_cashu::remove_transactions(ts, api_cashu::TransactionStatus::Success)
+                            .await;
+                    info!("api_cashu::remove_transactions.success: {:?}", res);
+                }
+
+                if all > up {
+                    let txs = api_cashu::get_cashu_pending_transactions().await;
+                    if let Ok(txs) = txs {
+                        for tx in txs {
+                            if tx.time < ts {
+                                let res = api_cashu::receive_token(tx.token.to_string()).await;
+                                info!(
+                                    "api_cashu::receive_token.recycle {}: {:?}",
+                                    tx.amount,
+                                    res.map(|txs| txs.iter().map(|tx| tx.amount()).sum::<u64>())
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
 
     let (bs, _bc) = broadcast::channel(1000);
     let clients = DashMap::new();
