@@ -364,7 +364,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 use nostr_sdk::prelude::*;
-use std::time::Duration;
+use std::{future::Future, time::Duration};
 async fn connect(config: &Config, keys: &Keys) -> anyhow::Result<Client> {
     let opts = nostr_sdk::client::options::Options::new()
         .autoconnect(true)
@@ -535,6 +535,78 @@ async fn post_event(
     }
 }
 
+fn event_with_cashu(
+    state: &(),
+    url: &Url,
+    event: Event,
+) -> impl Future<Output = Result<ClientMessage, nostr_relay_pool::relay::Error>> {
+    let mut msg = None;
+
+    let _state = state.clone();
+    let url = url.clone();
+    async move {
+        use nostr_sdk::nostr::nips::nip11::PaymentMethod;
+        use nostr_sdk::nostr::nips::nip11::RelayInformationDocument;
+        use std::collections::BTreeMap;
+        use tokio::sync::Mutex;
+        static RIS: Mutex<BTreeMap<Url, RelayInformationDocument>> =
+            Mutex::const_new(BTreeMap::new());
+
+        let mut lock = RIS.lock().await;
+        if !lock.contains_key(&url) {
+            match RelayInformationDocument::get(url.clone(), None).await {
+                Ok(ri) => {
+                    lock.insert(url.clone(), ri);
+                }
+                Err(e) => {
+                    error!("get relay info failed {}: {}", url, e)
+                }
+            }
+        }
+
+        // curl -H "Accept: application/nostr+json" https://relay.keychat.io
+        if let Some(ri) = lock.get(&url) {
+            if let Some(ps) = ri
+                .fees
+                .as_ref()
+                .and_then(|f| f.publication.iter().find(|f| f.method.is_some()))
+            {
+                let pm = ps.method.as_ref().unwrap();
+                if ps.amount > 0 {
+                    match pm {
+                        PaymentMethod::Cashu { mints } => {
+                            match api_cashu::send_stamp(ps.amount as _, mints.to_owned(), None)
+                                .await
+                            {
+                                Ok(tx) => {
+                                    info!(
+                                        "get cashu stamp for {} ok {}/{} {}: {}",
+                                        url,
+                                        tx.amount(),
+                                        ps.amount,
+                                        ps.unit,
+                                        tx.content()
+                                    );
+                                    msg = Some(tx.content().to_string());
+                                }
+                                Err(e) => {
+                                    error!(
+                                        "get cashu stamp for {} failed {} {}: {}",
+                                        url, ps.amount, ps.unit, e
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(ClientMessage::event_with(event, msg))
+    }
+    // .boxed()
+}
+
 async fn post_event_(
     _sa: SocketAddr,
     state: &State,
@@ -561,7 +633,8 @@ async fn post_event_(
         )]);
 
         let sent = client
-            .send_event_builder(builder)
+            // .send_event_builder(builder)
+            .send_event_builder_with(builder, move |url, event| event_with_cashu(&(), url, event))
             .await
             .inspect_err(|_e| *code = 500)?;
         let wm = WsMessage::new(200).data(EventOutput::new(sent).json());
@@ -592,9 +665,11 @@ async fn post_event_(
 
         // let enc = keychat_rust_ffi_plugin::api_nostr::encrypt(sender_keys, receiver_pubkey, content)
 
+        // let state = state.clone();
         // sig
         let resp = client
-            .send_event_builder(builder)
+            // .send_event_builder(builder)
+            .send_event_builder_with(builder, move |url, event| event_with_cashu(&(), url, event))
             .await
             .inspect_err(|_e| *code = 500)?;
 
