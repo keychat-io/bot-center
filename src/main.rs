@@ -194,10 +194,14 @@ async fn main() -> anyhow::Result<()> {
                 let k2 = k.clone();
                 let c2 = c.clone();
                 let s = s.clone();
+                let instant = std::time::Instant::now();
+                let alive = std::sync::Arc::new(AtomicU64::new(0));
+                let alive2 = alive.clone();
                 let h = move |rn: RelayPoolNotification| {
                     let k = k2.clone();
                     let s = s.clone();
                     let c = c2.clone();
+                    let alive = alive2.clone();
 
                     async move {
                         match rn {
@@ -345,24 +349,70 @@ async fn main() -> anyhow::Result<()> {
                                         info!("{} relay {} message: {:?}", k, relay_url, others)
                                     }
                                 }
+                                alive.store(
+                                    instant.elapsed().as_secs(),
+                                    std::sync::atomic::Ordering::Release,
+                                );
                             }
                             RelayPoolNotification::RelayStatus { status, relay_url } => {
-                                info!("{} relay {} status: {}", k, relay_url, status,)
+                                info!("{} relay {} status: {}", k, relay_url, status);
+                                if status == RelayStatus::Terminated {
+                                    return Ok(true);
+                                }
                             }
                             RelayPoolNotification::Authenticated { relay_url } => {
                                 info!("{} relay {} Authenticated", k, relay_url)
                             }
-                            RelayPoolNotification::Shutdown => {}
+                            RelayPoolNotification::Shutdown => {
+                                return Ok(true);
+                            }
                         }
                         Ok(false)
                     }
                 };
-                // h -> exit
-                match c.handle_notifications(h).await {
-                    Ok(()) => info!("{} handle_notifications ok: {:?}", k, ()),
-                    Err(e) => error!("{} handle_notifications failed: {}", k, e),
-                };
+
+                let c2 = c.clone();
+                let fut = tokio::spawn(async move { c2.handle_notifications(h).await });
+                let mut fut = std::pin::pin!(fut);
+                let mut interval = tokio::time::interval(Duration::from_secs(60));
+                loop {
+                    tokio::select! {
+                        res = &mut fut =>  {
+                                match res.unwrap() {
+                                    Ok(()) => info!("{} handle_notifications ok: {:?}", k, ()),
+                                    Err(e) => error!("{} handle_notifications failed: {}", k, e),
+                                };
+                                break;
+                        }
+                        _ = interval.tick() => {
+                            let meta = c.fetch_metadata(k.parse().unwrap(), Some(Duration::from_secs(5))).await;
+                            match meta {
+                                Ok(md) => {
+                                    info!("{} keepalive.fetch_metadata ok: {:?}", k, md.custom.len());
+                                }
+                                Err(nostr_sdk::client::Error::MetadataNotFound) => {
+                                    warn!("{} keepalive.fetch_metadata 404: {}", k, 404);
+                                }
+                                Err(e) => {
+                                    error!("{} keepalive.fetch_metadata failed, reconnect: {}", k, e);
+                                    break;
+                                }
+                            }
+
+                            // wait for fetch_metadata's EndOfStoredEvents
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            if alive.load(std::sync::atomic::Ordering::Acquire) + 10 < instant.elapsed().as_secs() {
+                                error!("{} active+10={} < {}, reconnect", k,alive.load(std::sync::atomic::Ordering::Acquire)+10, instant.elapsed().as_secs());
+                                break;
+                            }
+                        }
+                    }
+                }
+                warn!("{}.disconnect().await: {:?}", k, c.disconnect().await);
                 tokio::time::sleep(sleep).await;
+                c.connect().await;
+                // abort last handle_notifications
+                fut.abort();
             }
         };
         tokio::spawn(fut);
@@ -397,7 +447,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 use nostr_sdk::prelude::*;
-use std::{future::Future, time::Duration};
+use std::{future::Future, sync::atomic::AtomicU64, time::Duration};
 async fn connect(config: &Config, keys: &Keys) -> anyhow::Result<Client> {
     let opts = nostr_sdk::client::options::Options::new()
         .autoconnect(true)
