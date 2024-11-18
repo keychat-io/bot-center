@@ -4,7 +4,7 @@ timeout_ms = 3000
 
 relays = [
   "wss://relay.keychat.io",
-#   "wss://backup.keychat.io",
+  # "wss://backup.keychat.io",
 ]
 
 [cashu]

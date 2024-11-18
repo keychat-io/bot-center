@@ -5,12 +5,13 @@ extern crate serde;
 #[macro_use]
 extern crate tracing;
 
-use keychat_rust_ffi_plugin::api_cashu;
+use keychat_rust_ffi_plugin::{api_cashu, api_nostr, api_signal};
 
 mod config;
 use config::{Config, Opts};
 mod db;
 use db::LitePool;
+mod signal;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -37,6 +38,12 @@ async fn main() -> anyhow::Result<()> {
             my_keys.secret_key().to_bech32().unwrap(),
             my_keys.public_key().to_bech32().unwrap(),
         );
+
+        if true {
+            let (prik, pubk) = api_signal::generate_signal_ids()?;
+            println!("{}: {}", hex::encode(prik), hex::encode(pubk));
+        }
+
         return Ok(());
     }
 
@@ -49,6 +56,8 @@ async fn main() -> anyhow::Result<()> {
         }
     };
     let db = LitePool::open(&config.database).await?;
+
+    tokio::task::spawn_blocking(|| signal::init(format!("{}.sig.db", "xx"))).await??;
 
     api_cashu::init_db(config.cashu.database.clone(), None, false).await?;
     let mints = api_cashu::init_cashu(64).await?;
@@ -222,6 +231,7 @@ async fn main() -> anyhow::Result<()> {
                                 );
 
                                 let mut wrap = EventMsg::default();
+                                let mut is_signal_handshake = false;
                                 match event.kind.as_u16() {
                                     4 => {
                                         // let msg = keychat_rust_ffi_plugin::api_nostr::decrypt(
@@ -247,6 +257,7 @@ async fn main() -> anyhow::Result<()> {
                                                         }){
                                                             wrap.from = e.pubkey.to_hex();
                                                             wrap.content.replace(m);
+                                                            is_signal_handshake = true;
                                                         }
                                                     }
                                                 }
@@ -308,6 +319,20 @@ async fn main() -> anyhow::Result<()> {
                                 let insert = s.db.insert_event(&wrap).await;
                                 info!("{} stream_events_of {} insert: {:?}", k, id, insert);
                                 if insert.is_ok() {
+                                    if is_signal_handshake
+                                        && signal::handle_handshake(
+                                            &k,
+                                            wrap.content.as_deref().unwrap(),
+                                            &wrap.from,
+                                        )
+                                        .await
+                                        .map_err(|e| {
+                                            error!("{} signal::handle_handshake failed: {}", k, e)
+                                        })
+                                        .is_err()
+                                    {
+                                        return Ok(false);
+                                    };
                                     // wrap.event.replace(event);
                                     s.events
                                         .send(wrap)
@@ -731,10 +756,55 @@ async fn post_event_(
         //     unreachable!()
         // };
 
-        let msg = s
-            .nip04_encrypt(&userpub, body)
-            .await
-            .inspect_err(|_e| *code = 500)?;
+        let (nostrpk, nostrsk) = match &s {
+            NostrSigner::Keys(keys) => (
+                keys.public_key().to_hex(),
+                keys.secret_key().to_secret_hex(),
+            ),
+            _ => bail!("not found nostr key"),
+        };
+
+        let name = crate::signal::HANDSHAKE.lock().await.take();
+        let name = name
+            .as_ref()
+            .ok_or_else(|| format_err!("HANDSHAKE Name None"))?;
+
+        info!(
+            "{:?}",
+            signal::get_session(name.curve25519pk_hex.clone()).await
+        );
+
+        let c25519pubkey = &name.curve25519pk_hex;
+        let (msgc, myra, keys, _pre) = signal::encrypt_msg(
+            format!("signal hi: {}", c25519pubkey),
+            &c25519pubkey,
+            &name.pubkey,
+            &nostrpk,
+            &nostrsk,
+        )
+        .await?;
+        info!("myra: {:?}, keys: {}, pre: {:?}", myra, keys, _pre);
+        if let Some(s) = myra {
+            info!(
+                "myra: {:?}",
+                api_nostr::generate_seed_from_ratchetkey_pair(s)
+            );
+        }
+
+        let onetimekey = &name.onetimekey;
+        let msg = base64_simd::STANDARD.encode_to_string(&msgc);
+
+        info!(
+            "{:?}",
+            signal::get_session(name.curve25519pk_hex.clone()).await
+        );
+
+        info!("{}", msg);
+
+        // let msg = s
+        //     .nip04_encrypt(&userpub, body)
+        //     .await
+        //     .inspect_err(|_e| *code = 500)?;
 
         // todo?: double nip04_encrypt
         let builder = EventBuilder::new(
@@ -742,7 +812,8 @@ async fn post_event_(
             msg,
             vec![Tag::custom(
                 TagKind::SingleLetter(tag.clone()),
-                vec![user.to_string()],
+                // vec![user.to_string()],
+                vec![onetimekey.to_string()],
             )],
         );
 

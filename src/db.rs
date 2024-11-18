@@ -34,10 +34,6 @@ impl LitePool {
         Ok(it)
     }
 
-    pub fn database(&self) -> &SqlitePool {
-        &self.db
-    }
-
     pub async fn init(&self) -> Result<(), anyhow::Error> {
         sqlx::migrate!("./migrations")
             .run(&self.db)
@@ -128,6 +124,139 @@ impl LitePool {
         );
 
         let rows = sqlx::query(&sql).bind(&comfirmed).execute(&self.db).await?;
+        Ok(rows.rows_affected())
+    }
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Session {
+    pub nostrid: String,
+    pub ts: u64,
+    pub name: String,
+    pub pubkey: String,
+    pub onetimekey: String,
+
+}
+
+impl LitePool {
+    pub async fn insert_session(
+        &self,
+        id: &str,
+        ts: u64,
+        name: &str,
+        pubkey: &str,
+        onetimekey: &str,
+    ) -> anyhow::Result<u64> {
+        let sql = format!(
+            "insert into sessions (id, ts, name, pubkey, onetimekey) values(?, ?, ?, ?, ?)
+            ;",
+        );
+
+        let ts = ts as i64;
+        let rows = sqlx::query(&sql)
+            .bind(id)
+            .bind(&ts)
+            .bind(name)
+            .bind(pubkey)
+            .bind(onetimekey)
+            .execute(&self.db)
+            .await
+            .map(|a| a.rows_affected())?;
+        Ok(rows)
+    }
+
+    pub async fn get_session(&self, nostrid: &str) -> anyhow::Result<Option<Session>> {
+        let sql = 
+            "select id, ts, name, pubkey, onetimekey from sessions where id=? order by ts desc limit 1;";
+
+       if let Some(it) = sqlx::query(&sql).fetch_optional(&self.db).await? {
+        let se = Session {
+            nostrid: it.get(0),
+            ts: u64::try_from(it.get::<'_, i64, _>(1))?,
+            name: it.get(2),
+            pubkey: it.get(3),
+            onetimekey: it.get(4),
+        };
+
+            return Ok(Some(se));
+       }
+
+       Ok(None)
+    }
+
+    pub async fn take_onetimekey(&self, session: &Session) -> anyhow::Result<u64> {
+        let sql =
+            "update sessions set onetimekey=? where id=? and onetimekey!=''
+            ;";
+
+        let rows = sqlx::query(&sql).bind(&session.nostrid).execute(&self.db).await?;
+        Ok(rows.rows_affected())
+    }
+}
+
+impl LitePool {
+    pub async fn insert_receiver(
+        &self,
+        id: &str,
+        ts: u64,
+        pubkey: &str,
+        address: &str,
+    ) -> anyhow::Result<u64> {
+        let sql = format!(
+            "insert into receivers (id, ts, pubkey, address) values(?, ?, ?, ?)
+            ;",
+        );
+
+        let ts = ts as i64;
+        let rows = sqlx::query(&sql)
+            .bind(id)
+            .bind(&ts)
+            .bind(pubkey)
+            .bind(address)
+            .execute(&self.db)
+            .await
+            .map(|a| a.rows_affected())?;
+
+        let sql = "
+        with logs as (select * from receivers where id = ? order by ts desc),
+        old as (select id from logs where ts < (select min(ts) from (select * from logs limit 3)))
+        delete from receivers where id in old;";
+        let keep =  sqlx::query(&sql)
+        .bind(id)
+        .execute(&self.db)
+        .await
+        .map(|e|e.rows_affected());
+        debug!("keep n signal receivers for {}: {:?}",id, keep);
+
+        Ok(rows)
+    }
+
+    /// id, ts, pubkey
+    pub async fn get_receiver(&self, address: &str) -> anyhow::Result<Option<(String, u64, String)>> {
+        let sql = 
+            "select id, ts, pubkey, address from receivers where address=? limit 1";
+
+       if let Some(it) = sqlx::query(&sql)
+       .bind(address).fetch_optional(&self.db).await? {
+        let se =(
+            it.get(0),
+            u64::try_from(it.get::<'_, i64, _>(1))?,
+            it.get(2),
+        );
+
+            return Ok(Some(se));
+       }
+
+       Ok(None)
+    }
+
+    pub async fn remove(&self, nostrid: &str) -> anyhow::Result<u64> {
+        let sql =
+        "delete from receivers where id=?
+        ;";
+
+        let rows = sqlx::query(&sql).bind(nostrid).execute(&self.db).await?;
         Ok(rows.rows_affected())
     }
 }
