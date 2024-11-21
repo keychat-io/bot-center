@@ -43,6 +43,7 @@ use std::net::SocketAddr;
 pub struct Config {
     pub listen: SocketAddr,
     pub database: String,
+    pub database_signal: String,
     pub timeout_ms: u64,
     pub relays: Vec<String>,
     pub cashu: ConfigCashu,

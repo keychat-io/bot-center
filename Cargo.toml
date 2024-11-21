@@ -13,6 +13,7 @@ nostr-relay-pool= { git = "https://github.com/keychat-io/nostr", branch = "0.35.
 keychat_rust_ffi_plugin = { git = "https://github.com/keychat-io/keychat_rust_ffi_plugin.git", rev = "565456a3" }
 base64-simd = "0.8.0"
 sqlx = {version = "0.7.1", features = ["runtime-tokio", "sqlite"]}
+bitcoin_hashes = "0.14.0"
 # 
 axum = {version = "0.7.4", features = ["ws"]}
 axum-extra = { version = "0.9", features = ["typed-header"] }

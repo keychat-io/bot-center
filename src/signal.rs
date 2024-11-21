@@ -26,14 +26,38 @@ pub struct HandshakeName {
     pub time: i64,
 }
 
-#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HandshakeResponsePrekeyMessage {
-    #[serde(rename = "nostrId")]
-    pub nostrid: String,
-    pub name: String,
-    pub sig: String,
-    pub message: String,
+#[derive(Clone)]
+pub struct SignalKeys {
+    pub prikey: String,
+    pub pubkey: String,
+    pub keypair: KeychatIdentityKeyPair,
+}
+
+pub fn generate_signal_keypair(nostrsk: &str) -> anyhow::Result<SignalKeys> {
+    use api_signal::signal_store::libsignal_protocol::KeyPair;
+    use api_signal::signal_store::libsignal_protocol::PrivateKey;
+    use bitcoin_hashes::Hash;
+
+    let gen = format!("{}.{}.{}", nostrsk, "signal", "bot-center");
+    let hash = bitcoin_hashes::sha512_256::Hash::hash(gen.as_bytes());
+    let prik = PrivateKey::deserialize(hash.as_ref())?;
+    let kp: KeyPair = prik.try_into()?;
+
+    let sbytes = kp.private_key.serialize();
+    let pbytes = kp.public_key.serialize();
+    let prikey = hex::encode(&sbytes);
+    let pubkey = hex::encode(&pbytes);
+    let keypair = KeychatIdentityKeyPair {
+        private_key: sbytes.try_into().unwrap(),
+        identity_key: pbytes.to_vec().try_into().unwrap(), //+1
+    };
+    let this = SignalKeys {
+        prikey,
+        pubkey,
+        keypair,
+    };
+
+    Ok(this)
 }
 
 use keychat_rust_ffi_plugin::api_cashu::cashu_wallet::cashu::util::hex;
@@ -44,27 +68,19 @@ use keychat_rust_ffi_plugin::api_signal::KeychatIdentityKeyPair;
 use keychat_rust_ffi_plugin::api_signal::KeychatProtocolAddress;
 use serde_json::json;
 
-use std::sync::OnceLock;
-static KP: OnceLock<KeychatIdentityKeyPair> = OnceLock::new();
-pub fn init(path: String) -> anyhow::Result<()> {
-    api_signal::init_signal_db(path)?;
-
-    // a80a565695a21762eb7096437fda80534c00addcab9b09df765ec4b638460050: 05e1fd3e1056a3141a2fa321e859fb19841299234b7e45de1fc944a94feb9b5774
-    let prik = "a80a565695a21762eb7096437fda80534c00addcab9b09df765ec4b638460050";
-    let pubk = "05e1fd3e1056a3141a2fa321e859fb19841299234b7e45de1fc944a94feb9b5774";
-    let keypair = KeychatIdentityKeyPair {
-        private_key: hex::decode(prik)?.try_into().unwrap(),
-        identity_key: hex::decode(pubk)?.try_into().unwrap(),
-    };
-
-    KP.set(keypair.clone()).ok();
-    api_signal::init_keypair(keypair, 0)?;
-
+pub async fn init_db(path: String) -> anyhow::Result<()> {
+    tokio::task::spawn_blocking(|| api_signal::init_signal_db(path)).await??;
     Ok(())
 }
 
-async fn process_prekey_bundle(msg: HandshakeName) -> anyhow::Result<()> {
-    let keypair = KP.get().unwrap();
+pub async fn init_keypair(keys: &SignalKeys) -> anyhow::Result<()> {
+    let keypair = keys.keypair.clone();
+    tokio::task::spawn_blocking(move || api_signal::init_keypair(keypair, 0)).await??;
+    Ok(())
+}
+
+async fn process_prekey_bundle(msg: HandshakeName, keys: &SignalKeys) -> anyhow::Result<()> {
+    let keypair = keys.keypair.clone();
     let remote_address = KeychatProtocolAddress {
         // name: msg.pubkey.clone(),
         name: msg.curve25519pk_hex.clone(),
@@ -93,29 +109,68 @@ async fn process_prekey_bundle(msg: HandshakeName) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn handle_handshake(_mypubkey: &str, content: &str, _pubkey: &str) -> anyhow::Result<()> {
+use crate::db::*;
+pub async fn handle_handshake(
+    _mypubkey: &str,
+    content: &str,
+    _pubkey: &str,
+    keys: &SignalKeys,
+    db: &LitePool,
+) -> anyhow::Result<()> {
     let msg = serde_json::from_str::<Handshake>(content)?;
     // info!("msg: {:?}", msg);
     if !(msg.c == "signal" && msg.typo == 101) {
         bail!("signal && type 101")
     }
-    let msg = serde_json::from_str::<HandshakeName>(&msg.name)?;
-    process_prekey_bundle(msg.clone()).await?;
-    HANDSHAKE.lock().await.replace(msg);
+
+    let msg_name = serde_json::from_str::<HandshakeName>(&msg.name)?;
+    ensure!(_pubkey == msg_name.pubkey, "unmatched pubkey");
+
+    process_prekey_bundle(msg_name.clone(), keys).await?;
+
+    // clear old session
+    let session = db.get_session(_pubkey, _mypubkey).await?;
+    if let Some(_s) = session {
+        let keypair = keys.keypair.clone();
+        let rm = db.remove_session_and_receivers(_pubkey, _mypubkey).await?;
+
+        let bob_address = KeychatProtocolAddress {
+            name: _s.pubkey.to_owned(),
+            device_id: 1,
+        };
+
+        let res =
+            tokio::task::spawn_blocking(move || api_signal::delete_session(keypair, bob_address))
+                .await;
+        info!(
+            "api_signal::delete_session {}->{}: {:?} {:?}",
+            _mypubkey, _pubkey, rm, res
+        );
+    }
+
+    db.insert_session(
+        &msg_name.pubkey,
+        _mypubkey,
+        unix_time_ms(),
+        &msg_name.name,
+        &msg_name.curve25519pk_hex,
+        &msg_name.onetimekey,
+    )
+    .await?;
     Ok(())
 }
 
-use tokio::sync::Mutex;
-pub static HANDSHAKE: Mutex<Option<HandshakeName>> = Mutex::const_new(None);
 /// encrypt msg, my_receiver_addr, msg_keys_hash, alice_addrs_pre
 pub async fn encrypt_msg(
-    msg: String,
+    mut msg: String,
     curve25519_pubkey: &str,
     pubkey: &str,
     nostrpk: &str,
     nostrsk: &str,
+    keys: &SignalKeys,
+    pre: bool,
 ) -> anyhow::Result<(Vec<u8>, Option<String>, String, Option<Vec<String>>)> {
-    let keypair = KP.get().unwrap();
+    let keypair = keys.keypair.clone();
 
     let bob_address = KeychatProtocolAddress {
         name: curve25519_pubkey.to_owned(),
@@ -123,11 +178,13 @@ pub async fn encrypt_msg(
     };
 
     // for onetimekey only
-    let msg = generate_pre_key_response(nostrpk, nostrsk, &msg, curve25519_pubkey, pubkey)?;
+    if pre {
+        msg = generate_pre_key_response(nostrpk, nostrsk, &msg, curve25519_pubkey, pubkey)?;
+    }
 
     // encrypt msg, my_receiver_addr, msg_keys_hash, alice_addrs_pre
     let res = tokio::task::spawn_blocking(move || {
-        api_signal::encrypt_signal(keypair.clone(), msg, bob_address, None)
+        api_signal::encrypt_signal(keypair, msg, bob_address, None)
     })
     .await??;
     Ok(res)
@@ -161,12 +218,35 @@ fn generate_pre_key_response(
     Ok(str)
 }
 
-/// decrypt msg, msg_keys_hash, alice_addr_pre
+/// decrypt msg, userid
 pub async fn decrypt_msg(
+    content: &str,
+    nostrpk: &str,
+    receiverkey: &str,
+    keys: &SignalKeys,
+    db: &LitePool,
+) -> anyhow::Result<(String, String)> {
+    let ciphertext = base64_simd::STANDARD.decode_to_vec(&content)?;
+    let (userid, _ts, pubkey, onetimekey) = db
+        .get_receiver(receiverkey)
+        .await?
+        .ok_or_else(|| format_err!("signal receiver key not found"))?;
+    let res = decrypt_msg2(ciphertext, &pubkey, keys).await?;
+
+    if onetimekey.unwrap_or_default().len() >= 1 {
+        db.take_onetimekey(&userid, &nostrpk).await?;
+    }
+
+    Ok((res.0, userid))
+}
+
+/// decrypt msg, msg_keys_hash, alice_addr_pre
+pub async fn decrypt_msg2(
     ciphertext: Vec<u8>,
     curve25519_pubkey: &str,
+    keys: &SignalKeys,
 ) -> anyhow::Result<(String, String, Option<Vec<String>>)> {
-    let keypair = KP.get().unwrap();
+    let keypair = keys.keypair.clone();
 
     let bob_address = KeychatProtocolAddress {
         name: curve25519_pubkey.to_owned(),
@@ -174,7 +254,7 @@ pub async fn decrypt_msg(
     };
 
     let (bytes, keyhash, _pre) = tokio::task::spawn_blocking(move || {
-        api_signal::decrypt_signal(keypair.clone(), ciphertext, bob_address, 0, !true)
+        api_signal::decrypt_signal(keypair, ciphertext, bob_address, 0, !true)
     })
     .await??;
 
@@ -184,21 +264,12 @@ pub async fn decrypt_msg(
 
 use keychat_rust_ffi_plugin::api_signal::KeychatSignalSession;
 pub async fn get_session(
-    // key_pair: KeychatIdentityKeyPair,
     curve25519pk_hex: String,
-    // device_id: String,
+    keys: &SignalKeys,
 ) -> anyhow::Result<Option<KeychatSignalSession>> {
-    let keypair = KP.get().unwrap().clone();
-    info!("spawn_blocking.get_session0.");
-    // let address = HANDSHAKE
-    //     .lock()
-    //     .await
-    //     .as_ref()
-    //     .unwrap()
-    //     .curve25519pk_hex
-    //     .clone();
+    let keypair = keys.keypair.clone();
+
     let res = tokio::task::spawn_blocking(move || {
-        info!("spawn_blocking.get_session0");
         api_signal::get_session(keypair, curve25519pk_hex, 1.to_string())
     })
     .await??;

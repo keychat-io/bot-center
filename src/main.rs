@@ -5,12 +5,12 @@ extern crate serde;
 #[macro_use]
 extern crate tracing;
 
-use keychat_rust_ffi_plugin::{api_cashu, api_nostr, api_signal};
+use keychat_rust_ffi_plugin::{api_cashu, api_nostr};
 
 mod config;
 use config::{Config, Opts};
 mod db;
-use db::LitePool;
+use db::{unix_time_ms, LitePool};
 mod signal;
 
 #[tokio::main]
@@ -40,8 +40,9 @@ async fn main() -> anyhow::Result<()> {
         );
 
         if true {
-            let (prik, pubk) = api_signal::generate_signal_ids()?;
-            println!("{}: {}", hex::encode(prik), hex::encode(pubk));
+            // let (prik, pubk) = api_signal::generate_signal_ids()?;
+            let keys = signal::generate_signal_keypair(&my_keys.secret_key().to_secret_hex())?;
+            println!("{}: {}", keys.prikey, keys.pubkey);
         }
 
         return Ok(());
@@ -57,7 +58,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let db = LitePool::open(&config.database).await?;
 
-    tokio::task::spawn_blocking(|| signal::init(format!("{}.sig.db", "xx"))).await??;
+    signal::init_db(config.database_signal.to_string()).await?;
 
     api_cashu::init_db(config.cashu.database.clone(), None, false).await?;
     let mints = api_cashu::init_cashu(64).await?;
@@ -113,15 +114,18 @@ async fn main() -> anyhow::Result<()> {
         .enumerate()
     {
         let my_keys = Keys::parse(secret)?;
+        let keypair = signal::generate_signal_keypair(&my_keys.secret_key().to_secret_hex())?;
+        signal::init_keypair(&keypair).await?;
 
         let addr = config.listen;
         let pubkey_bech32 = my_keys.public_key().to_bech32()?;
         info!(
-            "{} {}\npubkey: {} {}\n",
+            "{} {}\npubkey: {} {}\nsignalid: {}",
             i,
             addr,
             pubkey_bech32,
             my_keys.public_key().to_hex(),
+            keypair.pubkey
         );
 
         let client = connect(&config, &my_keys).await?;
@@ -155,7 +159,15 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        clients.insert(my_keys.public_key().to_hex(), client);
+        let client = ClientWithKeys {
+            client,
+            nostr: my_keys,
+            signal: keypair,
+            // lock: Mutex::const_new(()),
+        };
+
+        let key = client.nostr.public_key().to_hex();
+        clients.insert(key, client.into());
     }
 
     let state = State {
@@ -191,6 +203,7 @@ async fn main() -> anyhow::Result<()> {
 
                 let opts = SubscribeAutoCloseOptions::default().filter(opts);
                 let res = c
+                    .client
                     .subscribe_with_id(SubscriptionId::new("s0"), vec![subscription], Some(opts))
                     .await;
                 match res {
@@ -234,47 +247,82 @@ async fn main() -> anyhow::Result<()> {
                                 let mut is_signal_handshake = false;
                                 match event.kind.as_u16() {
                                     4 => {
-                                        // let msg = keychat_rust_ffi_plugin::api_nostr::decrypt(
-                                        //     event.author().to_hex(),
-                                        //     k.clone(),
-                                        //     event.content().to_owned(),
-                                        // );
-                                        let s = c.signer().await.unwrap();
-                                        let msg =
-                                            s.nip04_decrypt(&event.pubkey, &event.content).await;
-                                        match msg {
-                                            Ok(m) => {
-                                                // double 04: ["EVENT", {}]
-                                                if let Ok((_, e)) =
-                                                    serde_json::from_str::<(String, Event)>(&m)
-                                                {
-                                                    if e.kind.as_u16() == 4 {
-                                                        if let Ok(m) =  s.nip04_decrypt(&e.pubkey, &e.content).await.map_err(|e|{
-                                                            error!(
-                                                                "{} stream_event 04.04 decrypt failed: {} {} {} {} {}",
-                                                                k, ks, event.created_at, event.kind, event.id, e
-                                                            );
-                                                        }){
-                                                            wrap.from = e.pubkey.to_hex();
-                                                            wrap.content.replace(m);
-                                                            is_signal_handshake = true;
-                                                        }
-                                                    }
-                                                }
-                                                if wrap.content.is_none() {
+                                        let tagsp2 = event
+                                            .tags
+                                            .iter()
+                                            .filter(|t| {
+                                                let t = t.as_slice();
+                                                t.len() > 1 && t[0] == "p"
+                                            })
+                                            .map(|t| {
+                                                t.as_slice().iter().skip(1).take_while(|s| {
+                                                    **s != k && PublicKey::from_hex(s).is_ok()
+                                                })
+                                            })
+                                            .flatten()
+                                            .next();
+
+                                        if let Some(p2) = tagsp2 {
+                                            let res = signal::decrypt_msg(
+                                                &event.content,
+                                                &k,
+                                                &p2,
+                                                &c.signal,
+                                                &s.db,
+                                            )
+                                            .await;
+
+                                            match res {
+                                                Ok((m, from)) => {
+                                                    wrap.from = from;
                                                     wrap.content.replace(m);
                                                 }
+                                                Err(e) => {
+                                                    error!(
+                                                        "{} stream_event 04 decrypt as signal->{} failed: {} {} {} {} {}",
+                                                        k, p2, ks, event.created_at, event.kind, event.id, e
+                                                    );
+                                                }
                                             }
-                                            Err(e) => {
-                                                error!(
-                                                    "{} stream_event 04 decrypt failed: {} {} {} {} {}",
-                                                    k, ks, event.created_at, event.kind, event.id, e
-                                                );
+                                        } else {
+                                            let s = c.client.signer().await.unwrap();
+                                            let msg = s
+                                                .nip04_decrypt(&event.pubkey, &event.content)
+                                                .await;
+                                            match msg {
+                                                Ok(m) => {
+                                                    // double 04: ["EVENT", {}]
+                                                    if let Ok((_, e)) =
+                                                        serde_json::from_str::<(String, Event)>(&m)
+                                                    {
+                                                        if e.kind.as_u16() == 4 {
+                                                            if let Ok(m) =  s.nip04_decrypt(&e.pubkey, &e.content).await.map_err(|e|{
+                                                                error!(
+                                                                    "{} stream_event 04.04 decrypt failed: {} {} {} {} {}",
+                                                                    k, ks, event.created_at, event.kind, event.id, e
+                                                                );
+                                                            }){
+                                                                wrap.from = e.pubkey.to_hex();
+                                                                wrap.content.replace(m);
+                                                                is_signal_handshake = true;
+                                                            }
+                                                        }
+                                                    }
+                                                    if wrap.content.is_none() {
+                                                        wrap.content.replace(m);
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    error!(
+                                                        "{} stream_event 04 decrypt failed: {} {} {} {} {}",
+                                                        k, ks, event.created_at, event.kind, event.id, e
+                                                    );
+                                                }
                                             }
                                         }
                                     }
                                     1059 => {
-                                        let msg = c.unwrap_gift_wrap(&event).await;
+                                        let msg = c.client.unwrap_gift_wrap(&event).await;
                                         match msg {
                                             Ok(m) => {
                                                 wrap.from = m.sender.to_hex();
@@ -324,6 +372,8 @@ async fn main() -> anyhow::Result<()> {
                                             &k,
                                             wrap.content.as_deref().unwrap(),
                                             &wrap.from,
+                                            &c.signal,
+                                            &s.db,
                                         )
                                         .await
                                         .map_err(|e| {
@@ -397,7 +447,7 @@ async fn main() -> anyhow::Result<()> {
                 };
 
                 let c2 = c.clone();
-                let fut = tokio::spawn(async move { c2.handle_notifications(h).await });
+                let fut = tokio::spawn(async move { c2.client.handle_notifications(h).await });
                 let mut fut = std::pin::pin!(fut);
                 let mut interval = tokio::time::interval(Duration::from_secs(60));
                 loop {
@@ -410,7 +460,7 @@ async fn main() -> anyhow::Result<()> {
                                 break;
                         }
                         _ = interval.tick() => {
-                            let meta = c.fetch_metadata(k.parse().unwrap(), Some(Duration::from_secs(5))).await;
+                            let meta = c.client.fetch_metadata(k.parse().unwrap(), Some(Duration::from_secs(5))).await;
                             match meta {
                                 Ok(md) => {
                                     info!("{} keepalive.fetch_metadata ok: {:?}", k, md.custom.len());
@@ -433,9 +483,13 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                 }
-                warn!("{}.disconnect().await: {:?}", k, c.disconnect().await);
+                warn!(
+                    "{}.disconnect().await: {:?}",
+                    k,
+                    c.client.disconnect().await
+                );
                 tokio::time::sleep(sleep).await;
-                c.connect().await;
+                c.client.connect().await;
                 // abort last handle_notifications
                 fut.abort();
             }
@@ -472,7 +526,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 use nostr_sdk::prelude::*;
-use std::{future::Future, sync::atomic::AtomicU64, time::Duration};
+use std::{future::Future, sync::atomic::AtomicU64, sync::Arc, time::Duration};
 async fn connect(config: &Config, keys: &Keys) -> anyhow::Result<Client> {
     let opts = nostr_sdk::client::options::Options::new()
         .autoconnect(true)
@@ -494,9 +548,18 @@ async fn connect(config: &Config, keys: &Keys) -> anyhow::Result<Client> {
 #[derive(Clone)]
 pub struct State {
     pub(crate) config: Config,
-    pub(crate) clients: DashMap<String, Client>,
+    pub(crate) clients: DashMap<String, Arc<ClientWithKeys>>,
     pub(crate) events: broadcast::Sender<EventMsg>,
     pub(crate) db: LitePool,
+}
+
+use signal::SignalKeys;
+// use tokio::sync::Mutex;
+pub struct ClientWithKeys {
+    pub(crate) client: Client,
+    pub(crate) nostr: Keys,
+    pub(crate) signal: SignalKeys,
+    // pub(crate) lock: Mutex<()>,
 }
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
@@ -725,7 +788,7 @@ async fn post_event_(
 ) -> anyhow::Result<WsMessage> {
     PublicKey::from_hex(key).inspect_err(|_e| *code = 400)?;
 
-    let client = state.clients.get(key).map(|c| c.clone()).ok_or_else(|| {
+    let cwk = state.clients.get(key).map(|c| c.clone()).ok_or_else(|| {
         *code = 404;
         anyhow!("not found the key from")
     })?;
@@ -740,7 +803,8 @@ async fn post_event_(
             vec![key.to_string()],
         )]);
 
-        let sent = client
+        let sent = cwk
+            .client
             // .send_event_builder(builder)
             .send_event_builder_with(builder, move |url, event| event_with_cashu(&(), url, event))
             .await
@@ -749,62 +813,60 @@ async fn post_event_(
         Ok(wm)
     } else {
         let userpub = PublicKey::from_hex(user).inspect_err(|_e| *code = 400)?;
-        let s = client.signer().await.unwrap();
-        // let ks = if let NostrSigner::Keys(ks) = &s {
-        //     ks
-        // } else {
-        //     unreachable!()
-        // };
+        let session = state.db.get_session(user, key).await?;
 
-        let (nostrpk, nostrsk) = match &s {
-            NostrSigner::Keys(keys) => (
-                keys.public_key().to_hex(),
-                keys.secret_key().to_secret_hex(),
-            ),
-            _ => bail!("not found nostr key"),
-        };
-
-        let name = crate::signal::HANDSHAKE.lock().await.take();
-        let name = name
-            .as_ref()
-            .ok_or_else(|| format_err!("HANDSHAKE Name None"))?;
-
-        info!(
-            "{:?}",
-            signal::get_session(name.curve25519pk_hex.clone()).await
-        );
-
-        let c25519pubkey = &name.curve25519pk_hex;
-        let (msgc, myra, keys, _pre) = signal::encrypt_msg(
-            format!("signal hi: {}", c25519pubkey),
-            &c25519pubkey,
-            &name.pubkey,
-            &nostrpk,
-            &nostrsk,
-        )
-        .await?;
-        info!("myra: {:?}, keys: {}, pre: {:?}", myra, keys, _pre);
-        if let Some(s) = myra {
-            info!(
-                "myra: {:?}",
-                api_nostr::generate_seed_from_ratchetkey_pair(s)
+        let mut dst = user.to_string();
+        let msg;
+        if let Some(session) = session {
+            // signal
+            let (msgc, myra, keys, _pre) = signal::encrypt_msg(
+                body.to_owned(),
+                &session.pubkey,
+                &session.nostrid,
+                &key,
+                &cwk.nostr.secret_key().to_secret_hex(),
+                &cwk.signal,
+                session.onetimekey.len() >= 1,
+            )
+            .await?;
+            debug!(
+                "{}->{} myra: {:?}, keys: {}, pre: {:?}",
+                key, user, myra, keys, _pre
             );
+
+            if let Some(s) = myra {
+                let ra = api_nostr::generate_seed_from_ratchetkey_pair(s)?;
+                debug!("{}->{} myra: {}", key, user, ra);
+
+                state
+                    .db
+                    .insert_receiver(&user, &key, unix_time_ms(), &session.pubkey, &ra)
+                    .await
+                    .map_err(|e| format_err!("save signal receiver address failed: {}", e))?;
+            }
+
+            let mut dest = session.onetimekey.clone();
+            let raw_session = signal::get_session(session.pubkey, &cwk.signal)
+                .await?
+                .ok_or_else(|| format_err!("get raw session none"))?;
+            debug!("{}->{} raw_session: {:?}", key, user, raw_session);
+            if dest.is_empty() {
+                let to = raw_session
+                    .bob_address
+                    .as_ref()
+                    .unwrap_or(&raw_session.address);
+                dest = api_nostr::generate_seed_from_ratchetkey_pair(to.to_owned())?;
+            }
+            msg = base64_simd::STANDARD.encode_to_string(&msgc);
+            dst = dest;
+        } else {
+            // nip04
+            let s = cwk.client.signer().await.unwrap();
+            msg = s
+                .nip04_encrypt(&userpub, body)
+                .await
+                .inspect_err(|_e| *code = 500)?;
         }
-
-        let onetimekey = &name.onetimekey;
-        let msg = base64_simd::STANDARD.encode_to_string(&msgc);
-
-        info!(
-            "{:?}",
-            signal::get_session(name.curve25519pk_hex.clone()).await
-        );
-
-        info!("{}", msg);
-
-        // let msg = s
-        //     .nip04_encrypt(&userpub, body)
-        //     .await
-        //     .inspect_err(|_e| *code = 500)?;
 
         // todo?: double nip04_encrypt
         let builder = EventBuilder::new(
@@ -812,18 +874,22 @@ async fn post_event_(
             msg,
             vec![Tag::custom(
                 TagKind::SingleLetter(tag.clone()),
-                // vec![user.to_string()],
-                vec![onetimekey.to_string()],
+                vec![dst.to_string()],
             )],
         );
 
-        // let enc = keychat_rust_ffi_plugin::api_nostr::encrypt(sender_keys, receiver_pubkey, content)
+        let event = if dst == user {
+            cwk.client.sign_event_builder(builder).await?
+        } else {
+            // signal sign by random key
+            let keys = Keys::generate();
+            builder.to_event(&keys)?
+        };
 
-        // let state = state.clone();
-        // sig
-        let resp = client
+        let resp = cwk
+            .client
             // .send_event_builder(builder)
-            .send_event_builder_with(builder, move |url, event| event_with_cashu(&(), url, event))
+            .send_event_with(event, move |url, event| event_with_cashu(&(), url, event))
             .await
             .inspect_err(|_e| *code = 500)?;
 
@@ -950,6 +1016,7 @@ async fn handle_socket(mut socket: WebSocket, who: SocketAddr, state: State) -> 
             .limit(1);
         let events = c
             .unwrap()
+            .client
             .get_events_of(
                 vec![filter],
                 EventSource::both(Some(Duration::from_millis(state.config.timeout_ms))),

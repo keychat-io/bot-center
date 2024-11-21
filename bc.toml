@@ -1,4 +1,5 @@
 database = "botcenter.db"
+database_signal = "botcenter_signal.db"
 listen = "0.0.0.0:5001"
 timeout_ms = 3000
 
