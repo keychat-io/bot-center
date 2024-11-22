@@ -244,7 +244,7 @@ async fn main() -> anyhow::Result<()> {
                                 );
 
                                 let mut wrap = EventMsg::default();
-                                let mut is_signal_handshake = false;
+                                let mut nip04_double = false;
                                 match event.kind.as_u16() {
                                     4 => {
                                         let tagsp2 = event
@@ -304,7 +304,7 @@ async fn main() -> anyhow::Result<()> {
                                                             }){
                                                                 wrap.from = e.pubkey.to_hex();
                                                                 wrap.content.replace(m);
-                                                                is_signal_handshake = true;
+                                                                nip04_double = true;
                                                             }
                                                         }
                                                     }
@@ -364,35 +364,52 @@ async fn main() -> anyhow::Result<()> {
                                     wrap.ts = event.created_at.as_u64() * 1000;
                                 }
 
+                                let mut handshake = None;
+                                if nip04_double {
+                                    match signal::try_decode_handshake(&mut wrap) {
+                                        Ok(m) => {
+                                            handshake.replace(m);
+                                        }
+                                        Err(e) => {
+                                            error!(
+                                                "{} event {} signal::try_decode_handshake failed: {}",
+                                                k, id, e
+                                            )
+                                        }
+                                    }
+                                }
+
                                 let insert = s.db.insert_event(&wrap).await;
-                                info!("{} stream_events_of {} insert: {:?}", k, id, insert);
+                                info!(
+                                    "{} stream_events_of {}-{} insert: {:?}",
+                                    k, id, nip04_double, insert
+                                );
                                 if insert.is_ok() {
-                                    if is_signal_handshake
-                                        && signal::handle_handshake(
-                                            &k,
-                                            wrap.content.as_deref().unwrap(),
-                                            &wrap.from,
-                                            &c.signal,
-                                            &s.db,
+                                    if let Some((h, n)) = handshake {
+                                        signal::handle_handshake(
+                                            &k, &wrap.from, h, n, &c.signal, &s.db,
                                         )
                                         .await
                                         .map_err(|e| {
-                                            error!("{} signal::handle_handshake failed: {}", k, e)
-                                        })
-                                        .is_err()
-                                    {
-                                        return Ok(false);
-                                    };
-                                    // wrap.event.replace(event);
-                                    s.events
-                                        .send(wrap)
-                                        .map_err(|e| {
                                             error!(
-                                                "{} stream_events_of {} broadcast failed: {}",
+                                                "{} event {} signal::handle_handshake failed: {}",
                                                 k, id, e
                                             )
                                         })
                                         .ok();
+                                    }
+
+                                    if !wrap.comfirmed {
+                                        s.events
+                                            .send(wrap)
+                                            .map_err(|e| {
+                                                error!(
+                                                    "{} stream_events_of {} broadcast failed: {}",
+                                                    k, id, e
+                                                )
+                                            })
+                                            .ok();
+                                    }
                                 }
                             }
                             RelayPoolNotification::Message { message, relay_url } => {

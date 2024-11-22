@@ -110,22 +110,30 @@ async fn process_prekey_bundle(msg: HandshakeName, keys: &SignalKeys) -> anyhow:
 }
 
 use crate::db::*;
-pub async fn handle_handshake(
-    _mypubkey: &str,
-    content: &str,
-    _pubkey: &str,
-    keys: &SignalKeys,
-    db: &LitePool,
-) -> anyhow::Result<()> {
+use crate::EventMsg;
+
+pub fn try_decode_handshake(wrap: &mut EventMsg) -> anyhow::Result<(Handshake, HandshakeName)> {
+    let content = wrap.content.as_deref().unwrap_or_default();
     let msg = serde_json::from_str::<Handshake>(content)?;
     // info!("msg: {:?}", msg);
     if !(msg.c == "signal" && msg.typo == 101) {
         bail!("signal && type 101")
     }
+    wrap.comfirmed = true;
 
     let msg_name = serde_json::from_str::<HandshakeName>(&msg.name)?;
-    ensure!(_pubkey == msg_name.pubkey, "unmatched pubkey");
+    ensure!(wrap.from == msg_name.pubkey, "unmatched pubkey");
 
+    Ok((msg, msg_name))
+}
+pub async fn handle_handshake(
+    _mypubkey: &str,
+    _pubkey: &str,
+    _msg: Handshake,
+    msg_name: HandshakeName,
+    keys: &SignalKeys,
+    db: &LitePool,
+) -> anyhow::Result<()> {
     process_prekey_bundle(msg_name.clone(), keys).await?;
 
     // clear old session
