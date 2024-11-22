@@ -19,6 +19,9 @@ $ cp .env.example .env
 
 # input your bot BOT_CENTER_SECRETS, Hex format(without 0x, lowercase), multiple use ';' separate
 
+# copy from bc.toml.example
+$ cp bc.toml.example bc.toml
+
 # modify bc.toml according to your needs
 ```
 
@@ -30,6 +33,8 @@ $ cargo run -- -v
 
 # production mode
 $ cargo run -r -- -v
+# or
+$ ./target/release/bot-center -v
 
 # build 
 $ cargo build -r 
