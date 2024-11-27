@@ -121,7 +121,7 @@ pub async fn try_decode_handshake(
     if !(msg.c == "signal" && msg.typo == 101) {
         bail!("signal && type 101")
     }
-    wrap.comfirmed = true;
+    // wrap.comfirmed = true;
 
     let msg_name = serde_json::from_str::<HandshakeName>(&msg.name)?;
     ensure!(wrap.from == msg_name.pubkey, "unmatched pubkey");
