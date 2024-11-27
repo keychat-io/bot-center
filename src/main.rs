@@ -365,8 +365,8 @@ async fn main() -> anyhow::Result<()> {
                                 }
 
                                 let mut handshake = None;
-                                if nip04_double {
-                                    match signal::try_decode_handshake(&mut wrap) {
+                                if nip04_double || wrap.kind == 1059 {
+                                    match signal::try_decode_handshake(&mut wrap).await {
                                         Ok(m) => {
                                             handshake.replace(m);
                                         }

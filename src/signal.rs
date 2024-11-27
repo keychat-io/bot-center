@@ -112,7 +112,9 @@ async fn process_prekey_bundle(msg: HandshakeName, keys: &SignalKeys) -> anyhow:
 use crate::db::*;
 use crate::EventMsg;
 
-pub fn try_decode_handshake(wrap: &mut EventMsg) -> anyhow::Result<(Handshake, HandshakeName)> {
+pub async fn try_decode_handshake(
+    wrap: &mut EventMsg,
+) -> anyhow::Result<(Handshake, HandshakeName)> {
     let content = wrap.content.as_deref().unwrap_or_default();
     let msg = serde_json::from_str::<Handshake>(content)?;
     // info!("msg: {:?}", msg);
@@ -123,6 +125,21 @@ pub fn try_decode_handshake(wrap: &mut EventMsg) -> anyhow::Result<(Handshake, H
 
     let msg_name = serde_json::from_str::<HandshakeName>(&msg.name)?;
     ensure!(wrap.from == msg_name.pubkey, "unmatched pubkey");
+
+    let nostrpk = &msg_name.pubkey;
+    let signalpk = &msg_name.curve25519pk_hex;
+    let time = msg_name.time;
+    let content = format!("Keychat-{nostrpk}-{signalpk}-{time}");
+    // info!("{}", content);
+
+    let pubkey = nostrpk.to_string();
+    let sig = msg_name.global_sign.to_owned();
+    let ok =
+        tokio::task::spawn_blocking(move || api_nostr::verify_schnorr(pubkey, sig, content, true))
+            .await??;
+    if !ok {
+        bail!("Signature verification failed")
+    }
 
     Ok((msg, msg_name))
 }
@@ -172,7 +189,7 @@ pub async fn handle_handshake(
 pub async fn encrypt_msg(
     mut msg: String,
     curve25519_pubkey: &str,
-    pubkey: &str,
+    _pubkey: &str,
     nostrpk: &str,
     nostrsk: &str,
     keys: &SignalKeys,
@@ -187,7 +204,7 @@ pub async fn encrypt_msg(
 
     // for onetimekey only
     if pre {
-        msg = generate_pre_key_response(nostrpk, nostrsk, &msg, curve25519_pubkey, pubkey)?;
+        msg = generate_pre_key_response(nostrpk, nostrsk, &keys.pubkey, &msg)?;
     }
 
     // encrypt msg, my_receiver_addr, msg_keys_hash, alice_addrs_pre
@@ -202,22 +219,20 @@ pub async fn encrypt_msg(
 fn generate_pre_key_response(
     nostrpk: &str,
     nostrsk: &str,
+    signalpk: &str,
     message: &str,
-    curve25519_pubkey: &str,
-    pubkey: &str,
 ) -> anyhow::Result<String> {
-    let ident = nostrpk;
-
-    let mut strs = [&ident, pubkey, &message];
-    strs.sort();
-    let content = strs.join(",");
-    info!("{}", content);
+    let time = unix_time_ms();
+    let content = format!("Keychat-{nostrpk}-{signalpk}-{time}");
+    // info!("{}", content);
 
     let sig = api_nostr::sign_schnorr(nostrsk.to_owned(), content)?;
 
     let js = json!({
-        "nostrId": &ident,
-        "name": curve25519_pubkey,
+        "nostrId": nostrpk,
+        "signalId": signalpk,
+        "name": nostrpk,
+        "time": time,
         "message": message,
         "sig": sig,
     });
