@@ -201,10 +201,10 @@ async fn main() -> anyhow::Result<()> {
                 let opts =
                     FilterOptions::WaitDurationAfterEOSE(Duration::from_secs(3600 * 24 * 30));
 
-                let opts = SubscribeAutoCloseOptions::default().filter(opts);
+                let _opts = SubscribeAutoCloseOptions::default().filter(opts);
                 let res = c
                     .client
-                    .subscribe_with_id(SubscriptionId::new("s0"), vec![subscription], Some(opts))
+                    .subscribe_with_id(SubscriptionId::new("s0"), vec![subscription], None)
                     .await;
                 match res {
                     Ok(s) => info!("{} subscribe_with_id {:?} ok: {}", k, s.val, ""),
@@ -492,7 +492,7 @@ async fn main() -> anyhow::Result<()> {
                             }
 
                             // wait for fetch_metadata's EndOfStoredEvents
-                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            tokio::time::sleep(sleep).await;
                             if alive.load(std::sync::atomic::Ordering::Acquire) + 10 < instant.elapsed().as_secs() {
                                 error!("{} active+10={} < {}, reconnect", k,alive.load(std::sync::atomic::Ordering::Acquire)+10, instant.elapsed().as_secs());
                                 break;
