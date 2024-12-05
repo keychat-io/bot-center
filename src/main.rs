@@ -525,6 +525,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/ws", routing::any(ws_handler))
         .route("/balance", routing::get(get_balance))
         .route("/receive", routing::post(post_receive))
+        .route("/send", routing::post(post_send))
         .with_state(state.clone())
         .layer(
             TraceLayer::new_for_http()

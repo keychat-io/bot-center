@@ -82,3 +82,11 @@ curl -X POST -H 'Content-type: application/json' --data 'cashuBo2Ftd2h0dHBzOi8vO
 # return the amount
 # {"code":200,"error":null,"data":"1"}
 ```
+
+### post /send send cashu token
+```sh
+curl -X POST -H 'Content-type: application/json' --data '{"unit": "sat", "amount": 8, "mint": "https://8333.space:3338"}' http://0.0.0.0:5001/send -v
+
+# return the token
+# {"code":200,"error":null,"data":"cashuBo2Ftd2h0dHBzOi8vODMzMy5zcGFjZTozMzM4YXVjc2F0YXSBomFpSAB1nj-LBrNvYXCBo2FhCGFzeEBmODU1NjdjZTE3MTYxMWMwMmIyYzBhY2JhNTQzZWYyNWMyODcxMjhmMWZhZjMyYjJlOWE5YWNlMDA1ZmIwZDk0YWNYIQNfwNpwY4rdliutAiHzD_cKmyACKTvb25fs9PqcrIDOWw"}
+```

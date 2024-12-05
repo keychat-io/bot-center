@@ -73,7 +73,6 @@ pub async fn post_receive(
         }
     }
 }
-
 async fn post_receive_(
     _sa: SocketAddr,
     _state: &State,
@@ -86,6 +85,64 @@ async fn post_receive_(
         .inspect_err(|_e| *code = 400)?;
     let amount = txs.iter().map(|t| t.amount()).sum::<u64>();
     Ok(WsMessage::default().code(200).data(amount.to_string()))
+}
+
+pub async fn post_send(
+    ConnectInfo(sa): ConnectInfo<SocketAddr>,
+    AxumState(state): AxumState<State>,
+    _header: HeaderMap,
+    body: String,
+) -> impl IntoResponse {
+    let body = body.trim();
+    info!("{} post_send {} bytes: {}", sa, body.len(), body,);
+
+    let f = |s| axum::response::Response::new(s);
+    let mut code = 200;
+    match post_send_(sa, &state, body, &mut code).await {
+        Ok(body) => {
+            info!("{} post_send ok: {:?}", sa, body.data);
+
+            let js = serde_json::to_string(&body).unwrap();
+            f(js)
+        }
+        Err(e) => {
+            warn!("{} post_send failed: {}", sa, e);
+
+            let msg = WsMessage::new(code).error(e.to_string());
+            let js = serde_json::to_string(&msg).unwrap();
+
+            let mut resp = f(js);
+            *resp.status_mut() = StatusCode::from_u16(code).unwrap();
+            resp
+        }
+    }
+}
+async fn post_send_(
+    _sa: SocketAddr,
+    _state: &State,
+    body: &str,
+    code: &mut u16,
+) -> anyhow::Result<WsMessage> {
+    let send: Send = serde_json::from_str(body).inspect_err(|_e| *code = 400)?;
+    if !send.unit.is_empty() {
+        if send.unit != "sat" {
+            *code = 400;
+            bail!("only support sat now");
+        }
+    }
+
+    // let token = api_cashu::decode_token(body.trim().to_string()).inspect_err(|_e| *code = 400)?;
+    let tx = api_cashu::send(send.amount, send.mint, None)
+        .await
+        .inspect_err(|_e| *code = 400)?;
+    Ok(WsMessage::default().code(200).data(tx.content().to_owned()))
+}
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Send {
+    pub unit: String,
+    pub amount: u64,
+    pub mint: String,
 }
 
 pub async fn post_metadata(
