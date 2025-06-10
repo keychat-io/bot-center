@@ -30,12 +30,12 @@ async fn main() -> anyhow::Result<()> {
 
     if opts.generate {
         let my_keys = Keys::generate();
-        println!(
+        info!(
             "{}: {}",
             my_keys.secret_key().to_secret_hex(),
             my_keys.public_key().to_hex()
         );
-        println!(
+        info!(
             "{}: {}",
             my_keys.secret_key().to_bech32().unwrap(),
             my_keys.public_key().to_bech32().unwrap(),
@@ -74,6 +74,8 @@ async fn main() -> anyhow::Result<()> {
     }
     tokio::spawn(async {
         let mut interval = tokio::time::interval(Duration::from_secs(600));
+        let mut mint_token_count: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
         loop {
             interval.tick().await;
             let res = api_cashu::check_pending().await;
@@ -92,12 +94,58 @@ async fn main() -> anyhow::Result<()> {
                     if let Ok(txs) = txs {
                         for tx in txs {
                             if tx.time < ts {
-                                let res = api_cashu::receive_token(tx.token.to_string()).await;
-                                info!(
-                                    "api_cashu::receive_token.recycle {}: {:?}",
-                                    tx.amount,
-                                    res.map(|txs| txs.iter().map(|tx| tx.amount()).sum::<u64>())
-                                );
+                                // Parse token to get mint_url
+                                let tokens: api_cashu::cashu_wallet::wallet::Token =
+                                    match tx.token.parse() {
+                                        Ok(t) => t,
+                                        Err(e) => {
+                                            error!("Failed to parse cashu token: {}", e);
+                                            return Err(e);
+                                        }
+                                    };
+                                let tokens = match tokens.into_v3() {
+                                    Ok(t) => t,
+                                    Err(e) => {
+                                        error!("Failed to convert token to v3: {}", e);
+                                        return Err(e);
+                                    }
+                                };
+
+                                let mint_url = match tokens.token.iter().map(|t| &t.mint).next() {
+                                    Some(url) => url.as_str().to_string(),
+                                    None => {
+                                        error!("No mint URL found in token");
+                                        return Ok(api_cashu::cashu_wallet::wallet::WalletError::MintUrlUnmatched);
+                                    }
+                                };
+
+                                let tokens = mint_token_count
+                                    .entry(mint_url.clone())
+                                    .or_insert_with(Vec::new);
+                                tokens.push(tx.token.to_string());
+
+                                if tokens.len() >= 5 {
+                                    info!(
+                                        "Processing batch of {} tokens for mint {}, need receive token",
+                                        tokens.len(),
+                                        mint_url
+                                    );
+                                    let res = api_cashu::receive_tokens(tokens.to_vec()).await;
+                                    info!(
+                                        "api_cashu::receive_token.batch {}: {:?}",
+                                        mint_url,
+                                        res.map(|txs| txs
+                                            .iter()
+                                            .map(|tx| tx.amount())
+                                            .sum::<u64>())
+                                    );
+                                } else {
+                                    debug!(
+                                        "Processing batch of {} tokens for mint {}, late recieve token",
+                                        tokens.len(),
+                                        mint_url
+                                    );
+                                }
                             }
                         }
                     }

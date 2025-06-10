@@ -14,7 +14,9 @@ use nostr_relay_pool::Output;
 use nostr_sdk::prelude::*;
 use serde_json::Value;
 use tokio::sync::broadcast;
-
+use std::collections::HashMap;
+use tokio::sync::Mutex;
+use once_cell::sync::Lazy;
 use crate::db::unix_time_ms;
 use crate::signal;
 use crate::EventMsg;
@@ -22,6 +24,10 @@ use crate::State;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::time::Duration;
+
+static MINT_TOKEN_COUNT: Lazy<Mutex<HashMap<String, Vec<String>>>> = Lazy::new(|| {
+    Mutex::new(HashMap::new())
+});
 
 pub async fn get_balance(
     ConnectInfo(_sa): ConnectInfo<SocketAddr>,
@@ -73,18 +79,64 @@ pub async fn post_receive(
         }
     }
 }
+
 async fn post_receive_(
     _sa: SocketAddr,
     _state: &State,
     body: &str,
     code: &mut u16,
 ) -> anyhow::Result<WsMessage> {
-    // let token = api_cashu::decode_token(body.trim().to_string()).inspect_err(|_e| *code = 400)?;
-    let txs = api_cashu::receive_token(body.to_string())
-        .await
-        .inspect_err(|_e| *code = 400)?;
-    let amount = txs.iter().map(|t| t.amount()).sum::<u64>();
-    Ok(WsMessage::default().code(200).data(amount.to_string()))
+    let tokens: api_cashu::cashu_wallet::wallet::Token = match body.trim().parse() {
+        Ok(t) => t,
+        Err(e) => {
+            *code = 400;
+            return Err(anyhow::anyhow!("Failed to parse cashu token: {}", e));
+        }
+    };
+    
+    let tokens = match tokens.into_v3() {
+        Ok(t) => t,
+        Err(e) => {
+            *code = 400;
+            return Err(anyhow::anyhow!("Failed to convert token to v3: {}", e));
+        }
+    };
+
+    let mint_url = match tokens.token.iter().map(|t| &t.mint).next() {
+        Some(url) => url.as_str().to_string(),
+        None => {
+            *code = 400;
+            return Err(anyhow::anyhow!("No mint URL found in token"));
+        }
+    };
+
+    let mut mint_token_count = MINT_TOKEN_COUNT.lock().await;
+    let tokens_list = mint_token_count.entry(mint_url.clone()).or_insert_with(Vec::new);
+    tokens_list.push(body.to_string());
+
+    if tokens_list.len() >= 5 {
+        info!("Processing batch of {} tokens for mint {} via API", tokens_list.len(), mint_url);
+        let tokens_to_process = tokens_list.clone();
+        tokens_list.clear();
+        
+        drop(mint_token_count);
+        
+        let res = api_cashu::receive_tokens(tokens_to_process).await;
+        match res {
+            Ok(txs) => {
+                let amount = txs.iter().map(|t| t.amount()).sum::<u64>();
+                info!("api_cashu::receive_tokens.batch {}: {}", mint_url, amount);
+                Ok(WsMessage::default().code(200).data(amount.to_string()))
+            }
+            Err(e) => {
+                *code = 400;
+                Err(anyhow::anyhow!("Failed to receive tokens: {}", e))
+            }
+        }
+    } else {
+        info!("Queued token for mint {} (count: {})", mint_url, tokens_list.len());
+        Ok(WsMessage::default().code(200).data("queued".to_string()))
+    }
 }
 
 pub async fn post_send(
@@ -117,13 +169,14 @@ pub async fn post_send(
         }
     }
 }
+
 async fn post_send_(
     _sa: SocketAddr,
     _state: &State,
     body: &str,
     code: &mut u16,
 ) -> anyhow::Result<WsMessage> {
-    let send: Send = serde_json::from_str(body).inspect_err(|_e| *code = 400)?;
+    let send: SendRequest = serde_json::from_str(body).inspect_err(|_e| *code = 400)?;
     if !send.unit.is_empty() {
         if send.unit != "sat" {
             *code = 400;
@@ -131,15 +184,15 @@ async fn post_send_(
         }
     }
 
-    // let token = api_cashu::decode_token(body.trim().to_string()).inspect_err(|_e| *code = 400)?;
     let tx = api_cashu::send(send.amount, send.mint, None)
         .await
         .inspect_err(|_e| *code = 400)?;
     Ok(WsMessage::default().code(200).data(tx.content().to_owned()))
 }
+
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Send {
+pub struct SendRequest {
     pub unit: String,
     pub amount: u64,
     pub mint: String,
@@ -439,7 +492,7 @@ async fn handle_socket_wrap(socket: WebSocket, who: SocketAddr, state: State, he
     }
 }
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WsMessage {
     code: u16,
     error: Option<String>,
