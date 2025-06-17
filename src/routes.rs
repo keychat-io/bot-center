@@ -9,7 +9,7 @@ use axum::{
 };
 
 use futures::{sink::SinkExt, stream::StreamExt};
-use keychat_rust_ffi_plugin::{api_cashu, api_nostr};
+use keychat_rust_ffi_plugin::{api_cashu::{self, cashu_wallet::cashu::amount}, api_nostr};
 use nostr_relay_pool::Output;
 use nostr_sdk::prelude::*;
 use serde_json::Value;
@@ -135,7 +135,7 @@ async fn post_receive_(
         }
     } else {
         info!("Queued token for mint {} (count: {})", mint_url, tokens_list.len());
-        Ok(WsMessage::default().code(200).data("queued".to_string()))
+        Ok(WsMessage::default().code(200).data(tokens_list.len().to_string()))
     }
 }
 
