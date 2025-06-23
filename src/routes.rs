@@ -102,6 +102,11 @@ async fn post_receive_(
         }
     };
 
+    if tokens.amount() != 1 && tokens.amount() != 8 {
+        *code = 400;
+        return Err(anyhow::anyhow!("Token amount must be 1 or 8, got {}", tokens.amount()));
+    }
+
     let mint_url = match tokens.token.iter().map(|t| &t.mint).next() {
         Some(url) => url.as_str().to_string(),
         None => {
